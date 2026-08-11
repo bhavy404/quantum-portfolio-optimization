@@ -1,0 +1,9 @@
+qiskit
+qiskit-aer
+qiskit-ibm-runtime
+fastapi
+uvicorn
+yfinance
+numpy
+pandas
+scipy

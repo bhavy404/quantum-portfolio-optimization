@@ -1,39 +1,14 @@
-# ============================================================
-# Core quantum computing packages
-# ============================================================
-qiskit>=1.0.0
-qiskit-ibm-runtime>=0.23.0
-qiskit-aer>=0.14.0
-
-# ============================================================
-# Portfolio optimization (QAOA)
-# ============================================================
-qiskit-optimization
-qiskit-algorithms
-
-# ============================================================
-# Data / finance
-# ============================================================
+qiskit
+qiskit-aer
+qiskit-ibm-runtime
+fastapi
+uvicorn
 yfinance
 numpy
 pandas
 scipy
-
-# ============================================================
-# Web API (dashboard)
-# ============================================================
-fastapi
-uvicorn
-
-# ============================================================
-# Configuration / security
-# ============================================================
-python-dotenv>=1.0.1
-
-# ============================================================
-# NOTE: Python 3.10+ is required for full IBM Quantum support.
-# macOS system Python 3.9 (LibreSSL) has TLS compatibility
-# issues with IBM Cloud endpoints (api.global-search-tagging).
-# Use Python from Homebrew, pyenv, or python.org (>= 3.10)
-# which link against OpenSSL.
-# ============================================================
+matplotlib
+seaborn
+plotly
+streamlit
+requests

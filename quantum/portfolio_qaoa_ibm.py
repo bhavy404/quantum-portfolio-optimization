@@ -33,7 +33,7 @@ import yfinance as yf
 from dotenv import load_dotenv
 from scipy.optimize import minimize
 
-from qiskit import transpile
+from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit.circuit.library import QAOAAnsatz
 from qiskit_optimization import QuadraticProgram
 from qiskit_optimization.converters import LinearEqualityToPenalty
@@ -670,11 +670,8 @@ def main():
 
     print("\n=== S6: Transpile for IBM Hardware ===")
 
-    isa_circuit = transpile(
-        circuit,
-        backend=backend,
-        optimization_level=1,
-    )
+    pm = generate_preset_pass_manager(optimization_level=1, backend=backend)
+    isa_circuit = pm.run(circuit)
 
     print(f"Transpiled qubits: {isa_circuit.num_qubits}")
     print(f"Transpiled depth: {isa_circuit.depth()}")

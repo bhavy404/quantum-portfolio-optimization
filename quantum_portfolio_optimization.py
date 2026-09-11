@@ -14,16 +14,21 @@ def main():
     tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META']
     print(f"Downloading data for {tickers}...")
     
-    # Download dataset
-    data = pd.DataFrame()
-    for t in tickers:
-        df = yf.download(t, start="2023-01-01", end="2024-01-01", progress=False)
-        # Newer yfinance versions return a MultiIndex dataframe when downloading even a single ticker.
-        # We extract 'Close' or 'Adj Close' safely.
-        if isinstance(df.columns, pd.MultiIndex):
-            data[t] = df[('Close', t)]
+    # Download dataset in batch
+    df = yf.download(tickers, start="2023-01-01", end="2024-01-01", progress=False, auto_adjust=False)
+    if df.empty:
+        raise RuntimeError(f"Failed to download data for tickers: {tickers}")
+    
+    if isinstance(df.columns, pd.MultiIndex):
+        if 'Close' in df.columns.levels[0]:
+            data = df['Close'][tickers].dropna()
+        elif 'Adj Close' in df.columns.levels[0]:
+            data = df['Adj Close'][tickers].dropna()
         else:
-            data[t] = df['Close']
+            raise KeyError("Neither 'Close' nor 'Adj Close' found in yfinance response.")
+    else:
+        col = 'Close' if 'Close' in df.columns else ('Adj Close' if 'Adj Close' in df.columns else df.columns[0])
+        data = df[[col]].rename(columns={col: tickers[0]}).dropna()
         
     # Calculate daily returns
     returns = data.pct_change().dropna()
@@ -87,7 +92,7 @@ def main():
     result = qaoa_optimizer.solve(qubo)
     
     print("\nOptimal Portfolio Configuration (Binary Result):", result.x)
-    selected_stocks = [tickers[i] for i in range(len(tickers)) if result.x[i] == 1.0]
+    selected_stocks = [tickers[i] for i in range(len(tickers)) if int(round(result.x[i])) == 1]
     print("Selected stocks:", selected_stocks)
 
     print("\n=== S5: Results ===")

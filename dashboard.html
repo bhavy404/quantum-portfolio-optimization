@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>QPortal — Secure Quantum Portfolio Optimization (QAOA + BB84 QKD)</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Plus Jakarta Sans', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            quantum: {
+              50: '#eef2ff',
+              500: '#6366f1',
+              600: '#4f46e5',
+              900: '#1e1b4b',
+            }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    body { font-family: 'Plus Jakarta Sans', sans-serif; }
+    .font-mono { font-family: 'JetBrains Mono', monospace; }
+    .glass-panel {
+      background: rgba(15, 23, 42, 0.75);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .custom-scrollbar::-webkit-scrollbar { height: 6px; width: 6px; }
+    .custom-scrollbar::-webkit-scrollbar-track { background: rgba(0,0,0,0.1); }
+    .custom-scrollbar::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.15); border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen antialiased selection:bg-indigo-500 selection:text-white pb-16">
+
+  <!-- TOP NAVIGATION / STATUS BAR -->
+  <header class="border-b border-slate-800 bg-slate-900/60 sticky top-0 z-40 backdrop-blur-md">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3.5 flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-tr from-indigo-600 via-purple-600 to-cyan-400 flex items-center justify-center shadow-lg shadow-indigo-500/20">
+          <svg class="w-5 h-5 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+          </svg>
+        </div>
+        <div>
+          <div class="flex items-center gap-2">
+            <h1 class="text-base font-bold tracking-tight text-white">QPortal</h1>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 font-mono font-medium">v2.0-QPU</span>
+          </div>
+          <p class="text-xs text-slate-400">Secure Quantum Portfolio Optimization with BB84 QKD</p>
+        </div>
+      </div>
+
+      <!-- HARDWARE & SERVICE STATUS BADGES -->
+      <div class="flex items-center flex-wrap gap-2 text-xs">
+        <div class="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-emerald-950/40 border border-emerald-500/30 text-emerald-400">
+          <span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          <span class="font-medium">IBM QPU:</span>
+          <span id="nav-qpu-name" class="font-mono font-semibold">ibm_fez (156 Qubits)</span>
+        </div>
+        <div class="px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300 font-mono">
+          Qiskit 2.0+ Runtime
+        </div>
+        <div class="px-2.5 py-1 rounded-lg bg-slate-800/80 border border-slate-700 text-slate-300 font-mono">
+          FastAPI Backend
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 pt-6 space-y-6">
+
+    <!-- SUB-NAV / TAB SWITCHER -->
+    <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800/80 pb-4">
+      <div class="flex items-center gap-2 p-1 bg-slate-900 rounded-xl border border-slate-800">
+        <button id="tab-btn-bb84" onclick="switchTab('bb84')" class="px-4 py-2 rounded-lg text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/20 flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/>
+          </svg>
+          1. BB84 Quantum Key Distribution
+        </button>
+        <button id="tab-btn-qaoa" onclick="switchTab('qaoa')" class="px-4 py-2 rounded-lg text-xs font-semibold transition-all text-slate-400 hover:text-slate-200 flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"/>
+          </svg>
+          2. QAOA Portfolio Optimization
+        </button>
+        <button id="tab-btn-secure" onclick="switchTab('secure')" class="px-4 py-2 rounded-lg text-xs font-semibold transition-all text-slate-400 hover:text-slate-200 flex items-center gap-2">
+          <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/>
+          </svg>
+          3. Quantum-Secured Payload Verification
+        </button>
+      </div>
+
+      <!-- PRESET QUICK SELECTOR -->
+      <div class="flex items-center gap-2 text-xs">
+        <span class="text-slate-400 font-medium">Quick Asset Presets:</span>
+        <button onclick="applyPreset('US')" class="px-2.5 py-1 rounded-md bg-slate-800/80 hover:bg-slate-700 text-slate-200 border border-slate-700 transition">
+          🇺🇸 US Tech 5
+        </button>
+        <button onclick="applyPreset('INDIA')" class="px-2.5 py-1 rounded-md bg-indigo-950/40 hover:bg-indigo-900/50 text-indigo-300 border border-indigo-500/30 transition">
+          🇮🇳 Indian Nifty Bluechips
+        </button>
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!-- SECTION 1: BB84 QUANTUM KEY DISTRIBUTION (REAL QPU / SIMULATOR)   -->
+    <!-- ================================================================= -->
+    <div id="tab-content-bb84" class="space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- CONTROLS COLUMN -->
+        <div class="glass-panel p-5 rounded-2xl space-y-4">
+          <div class="flex items-center justify-between">
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-indigo-500"></span>
+              QKD Protocol Controls
+            </h2>
+            <span class="text-xs font-mono text-indigo-400">BB84 Engine</span>
+          </div>
+
+          <!-- TARGET EXECUTION PLATFORM -->
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-slate-300">Execution Target</label>
+            <select id="bb84-target" class="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              <option value="hardware" selected>Real IBM Quantum QPU (ibm_fez / ibm_marrakesh)</option>
+              <option value="simulator">Local Aer Simulator (Instant)</option>
+            </select>
+          </div>
+
+          <!-- QPU PINNING -->
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-slate-300">IBM Quantum QPU Backend</label>
+            <select id="bb84-backend" class="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-3 py-2 text-xs focus:ring-2 focus:ring-indigo-500 focus:outline-none">
+              <option value="ibm_fez" selected>ibm_fez (156 Qubits - 0 Queue)</option>
+              <option value="ibm_marrakesh">ibm_marrakesh (156 Qubits)</option>
+              <option value="">Least Busy QPU (Auto-Select)</option>
+            </select>
+          </div>
+
+          <!-- QUBIT COUNT SLIDER -->
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-300 font-medium">Qubits / Photons (N)</span>
+              <span id="qubits-val" class="font-mono text-indigo-400 font-bold">16</span>
+            </div>
+            <input id="bb84-qubits" type="range" min="8" max="48" step="8" value="16" oninput="document.getElementById('qubits-val').innerText = this.value" class="w-full accent-indigo-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer">
+            <p class="text-[11px] text-slate-400">16 qubits yield ~8 sifted bits, generating a SHA-256 quantum key.</p>
+          </div>
+
+          <!-- EVE EAVESDROPPING ATTACK SWITCH -->
+          <div class="p-3 rounded-xl bg-slate-900/90 border border-slate-800 space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <span class="text-xs font-semibold text-rose-400">Simulate Eve Interception</span>
+              </div>
+              <label class="relative inline-flex items-center cursor-pointer">
+                <input id="bb84-eve" type="checkbox" class="sr-only peer">
+                <div class="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-rose-600"></div>
+              </label>
+            </div>
+            <p class="text-[11px] text-slate-400 leading-snug">
+              Eve performs intercept-and-resend. Wavefunction collapse introduces ~25% error, tripping the 11% QBER threshold to abort.
+            </p>
+          </div>
+
+          <!-- ACTION BUTTON -->
+          <button id="btn-run-bb84" onclick="runBB84()" class="w-full py-2.5 rounded-xl bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-500 hover:to-cyan-500 text-white font-semibold text-xs transition shadow-lg shadow-indigo-500/20 flex items-center justify-center gap-2">
+            <svg id="spinner-bb84" class="w-4 h-4 animate-spin hidden" viewBox="0 0 24 24" fill="none">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+            </svg>
+            <span id="btn-bb84-text">Execute BB84 on Hardware</span>
+          </button>
+        </div>
+
+        <!-- RESULTS & METRICS COLUMN -->
+        <div class="lg:col-span-2 space-y-4">
+          <!-- METRIC CARDS ROW -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Security Verdict</p>
+              <p id="qkd-security-badge" class="mt-1 text-xs font-bold text-slate-300 font-mono">READY</p>
+            </div>
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Physical QBER</p>
+              <p id="qkd-qber-val" class="mt-1 text-sm font-bold text-emerald-400 font-mono">0.0%</p>
+            </div>
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Sifted Efficiency</p>
+              <p id="qkd-sifted-ratio" class="mt-1 text-sm font-bold text-indigo-300 font-mono">0 / 0</p>
+            </div>
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">IBM Job ID</p>
+              <p id="qkd-job-id" class="mt-1 text-[11px] font-mono text-cyan-400 truncate" title="None">None</p>
+            </div>
+          </div>
+
+          <!-- DERIVED KEY BANNER -->
+          <div class="glass-panel p-4 rounded-xl space-y-1.5 border border-indigo-500/20">
+            <div class="flex items-center justify-between text-xs">
+              <span class="font-semibold text-slate-300 flex items-center gap-1.5">
+                <svg class="w-3.5 h-3.5 text-indigo-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z"/>
+                </svg>
+                Derived 256-Bit Quantum Symmetric Key (SHA-256 HKDF)
+              </span>
+              <button onclick="copyKey()" class="text-[11px] text-indigo-400 hover:text-indigo-300 font-mono">Copy Key</button>
+            </div>
+            <p id="qkd-key-hex" class="text-xs font-mono text-emerald-400 break-all bg-slate-900/80 p-2.5 rounded-lg border border-slate-800">
+              Run BB84 above to establish a hardware-backed quantum key.
+            </p>
+          </div>
+
+          <!-- LIVE PHOTON / BASIS SIFTING TABLE -->
+          <div class="glass-panel p-4 rounded-xl space-y-3">
+            <div class="flex items-center justify-between">
+              <h3 class="text-xs font-bold text-white tracking-wide uppercase">Photon Sifting & Basis Reconciliation</h3>
+              <span class="text-[11px] text-slate-400 font-mono">Green = Matching Basis (Retained)</span>
+            </div>
+            <div class="overflow-x-auto custom-scrollbar">
+              <table class="w-full text-[11px] text-left border-collapse">
+                <thead>
+                  <tr class="text-slate-400 border-b border-slate-800 font-mono">
+                    <th class="py-1.5 px-2">Qubit</th>
+                    <th class="py-1.5 px-2">Alice Bit</th>
+                    <th class="py-1.5 px-2">Alice Basis</th>
+                    <th class="py-1.5 px-2">Bob Basis</th>
+                    <th class="py-1.5 px-2">Bob Meas</th>
+                    <th class="py-1.5 px-2">Match?</th>
+                    <th class="py-1.5 px-2">Sifted Bit</th>
+                  </tr>
+                </thead>
+                <tbody id="bb84-sifting-table" class="divide-y divide-slate-800/60 font-mono">
+                  <tr>
+                    <td colspan="7" class="py-4 text-center text-slate-400">Click "Execute BB84" to display quantum state preparation and measurements.</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!-- SECTION 2: QAOA QUANTUM PORTFOLIO OPTIMIZATION                    -->
+    <!-- ================================================================= -->
+    <div id="tab-content-qaoa" class="hidden space-y-6">
+      <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+        <!-- QAOA CONFIGURATION PANEL -->
+        <div class="glass-panel p-5 rounded-2xl space-y-4">
+          <h2 class="text-sm font-bold text-white flex items-center gap-2">
+            <span class="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
+            Portfolio Optimization Controls
+          </h2>
+
+          <div class="space-y-1.5">
+            <label class="text-xs font-medium text-slate-300">Equity Tickers (Comma-separated)</label>
+            <input id="qaoa-tickers" type="text" value="AAPL, MSFT, GOOGL, AMZN, META" class="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-3 py-2 text-xs font-mono focus:ring-2 focus:ring-cyan-500 focus:outline-none">
+            <p class="text-[11px] text-slate-400">Supports US stocks & Indian NSE/BSE stocks (e.g. RELIANCE.NS, TCS.NS).</p>
+          </div>
+
+          <div class="grid grid-cols-2 gap-3">
+            <div class="space-y-1">
+              <label class="text-xs text-slate-300">Start Date</label>
+              <input id="qaoa-start" type="date" value="2023-01-01" class="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono">
+            </div>
+            <div class="space-y-1">
+              <label class="text-xs text-slate-300">End Date</label>
+              <input id="qaoa-end" type="date" value="2024-01-01" class="w-full bg-slate-900 border border-slate-700 text-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-mono">
+            </div>
+          </div>
+
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-300 font-medium">Risk Tolerance Factor (q)</span>
+              <span id="risk-val" class="font-mono text-cyan-400 font-bold">0.50</span>
+            </div>
+            <input id="qaoa-risk" type="range" min="0.0" max="1.0" step="0.05" value="0.5" oninput="document.getElementById('risk-val').innerText = parseFloat(this.value).toFixed(2)" class="w-full accent-cyan-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer">
+            <div class="flex justify-between text-[10px] text-slate-400">
+              <span>Risk Averse (0.0)</span>
+              <span>Balanced (0.5)</span>
+              <span>Return Aggressive (1.0)</span>
+            </div>
+          </div>
+
+          <div class="space-y-1.5">
+            <div class="flex justify-between text-xs">
+              <span class="text-slate-300 font-medium">Asset Selection Budget (K)</span>
+              <span id="budget-val" class="font-mono text-cyan-400 font-bold">2</span>
+            </div>
+            <input id="qaoa-budget" type="range" min="1" max="5" step="1" value="2" oninput="document.getElementById('budget-val').innerText = this.value" class="w-full accent-cyan-500 h-1.5 bg-slate-800 rounded-lg cursor-pointer">
+          </div>
+
+          <button id="btn-run-qaoa" onclick="runQAOA()" class="w-full py-2.5 rounded-xl bg-gradient-to-r from-cyan-600 to-blue-600 hover:from-cyan-500 hover:to-blue-500 text-white font-semibold text-xs transition shadow-lg shadow-cyan-500/20 flex items-center justify-center gap-2">
+            <svg id="spinner-qaoa" class="w-4 h-4 animate-spin hidden" viewBox="0 0 24 24" fill="none">
+              <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+              <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+            </svg>
+            <span id="btn-qaoa-text">Execute QAOA Portfolio Solver</span>
+          </button>
+        </div>
+
+        <!-- QAOA RESULTS & CHARTS -->
+        <div class="lg:col-span-2 space-y-4">
+          <!-- METRIC CARDS -->
+          <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Selected Assets</p>
+              <p id="res-stocks" class="mt-1 text-sm font-bold text-cyan-300 font-mono">--</p>
+            </div>
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Annual Return (Train)</p>
+              <p id="res-return" class="mt-1 text-sm font-bold text-emerald-400 font-mono">--</p>
+            </div>
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Sharpe Ratio (Train)</p>
+              <p id="res-sharpe" class="mt-1 text-sm font-bold text-indigo-300 font-mono">--</p>
+            </div>
+            <div class="glass-panel p-3.5 rounded-xl">
+              <p class="text-[11px] text-slate-400 font-medium">Test Sharpe (Out-of-Sample)</p>
+              <p id="res-test-sharpe" class="mt-1 text-sm font-bold text-purple-300 font-mono">--</p>
+            </div>
+          </div>
+
+          <!-- ASSET WEIGHT CHART -->
+          <div class="glass-panel p-5 rounded-2xl space-y-2">
+            <h3 class="text-xs font-bold text-white tracking-wide uppercase">Optimal Portfolio Capital Allocation</h3>
+            <div class="h-56">
+              <canvas id="portfolioChart"></canvas>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ================================================================= -->
+    <!-- SECTION 3: QUANTUM-SECURED PAYLOAD VERIFICATION (AES-256-GCM)     -->
+    <!-- ================================================================= -->
+    <div id="tab-content-secure" class="hidden space-y-6">
+      <div class="glass-panel p-6 rounded-2xl space-y-6">
+        <div class="flex flex-wrap items-center justify-between gap-4 border-b border-slate-800 pb-4">
+          <div>
+            <h2 class="text-sm font-bold text-white flex items-center gap-2">
+              <span class="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+              Quantum Payload Encryption & Decryption Pipeline
+            </h2>
+            <p class="text-xs text-slate-400 mt-0.5">Encrypts the QAOA portfolio allocation using the BB84 QPU-derived key with AES-256-GCM</p>
+          </div>
+          <button onclick="encryptActivePortfolio()" class="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-semibold text-xs transition shadow-lg shadow-emerald-500/20">
+            Encrypt Live Portfolio Result
+          </button>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-5 text-xs">
+          <!-- 1. PLAINTEXT PAYLOAD -->
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-slate-300 font-semibold">
+              <span>1. Original Plaintext Payload</span>
+              <span class="text-[10px] text-slate-400 font-mono">JSON</span>
+            </div>
+            <pre id="payload-plaintext" class="p-3 bg-slate-900 border border-slate-800 rounded-xl font-mono text-cyan-300 h-64 overflow-auto custom-scrollbar">No portfolio optimized yet. Run QAOA first.</pre>
+          </div>
+
+          <!-- 2. CIPHERTEXT OVER WIRE -->
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-slate-300 font-semibold">
+              <span>2. Encrypted Wire Ciphertext</span>
+              <span class="text-[10px] text-indigo-400 font-mono">AES-256-GCM</span>
+            </div>
+            <div class="p-3 bg-slate-900 border border-slate-800 rounded-xl space-y-2 h-64 overflow-auto custom-scrollbar font-mono">
+              <div>
+                <span class="text-slate-400 text-[10px]">96-bit Nonce:</span>
+                <p id="payload-nonce" class="text-indigo-400 break-all text-[11px]">--</p>
+              </div>
+              <div>
+                <span class="text-slate-400 text-[10px]">Encrypted Payload + Auth Tag:</span>
+                <p id="payload-ciphertext" class="text-rose-400 break-all text-[11px]">--</p>
+              </div>
+            </div>
+          </div>
+
+          <!-- 3. VERIFIED DECRYPTION -->
+          <div class="space-y-2">
+            <div class="flex items-center justify-between text-slate-300 font-semibold">
+              <span>3. Verified Decryption</span>
+              <span id="decryption-status" class="text-[10px] text-slate-400 font-mono">Pending</span>
+            </div>
+            <pre id="payload-decrypted" class="p-3 bg-slate-900 border border-slate-800 rounded-xl font-mono text-emerald-400 h-64 overflow-auto custom-scrollbar">Click "Encrypt Live Portfolio" to test roundtrip decryption.</pre>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </main>
+
+  <script>
+    // State management
+    let activeKeyHex = null;
+    let activeKeyOrigin = null;
+    let activePortfolioPayload = null;
+    let chartInstance = null;
+
+    function switchTab(tabId) {
+      ['bb84', 'qaoa', 'secure'].forEach(t => {
+        document.getElementById(`tab-content-${t}`).classList.add('hidden');
+        const btn = document.getElementById(`tab-btn-${t}`);
+        btn.className = "px-4 py-2 rounded-lg text-xs font-semibold transition-all text-slate-400 hover:text-slate-200 flex items-center gap-2";
+      });
+
+      document.getElementById(`tab-content-${tabId}`).classList.remove('hidden');
+      const activeBtn = document.getElementById(`tab-btn-${tabId}`);
+      activeBtn.className = "px-4 py-2 rounded-lg text-xs font-semibold transition-all bg-indigo-600 text-white shadow-md shadow-indigo-600/20 flex items-center gap-2";
+    }
+
+    function applyPreset(preset) {
+      if (preset === 'US') {
+        document.getElementById('qaoa-tickers').value = "AAPL, MSFT, GOOGL, AMZN, META";
+      } else if (preset === 'INDIA') {
+        document.getElementById('qaoa-tickers').value = "RELIANCE.NS, TCS.NS, INFY.NS, HDFCBANK.NS, ICICIBC.NS";
+      }
+      switchTab('qaoa');
+    }
+
+    async function runBB84() {
+      const target = document.getElementById('bb84-target').value;
+      const backend = document.getElementById('bb84-backend').value;
+      const qubits = parseInt(document.getElementById('bb84-qubits').value);
+      const eve = document.getElementById('bb84-eve').checked;
+
+      const btn = document.getElementById('btn-run-bb84');
+      const spinner = document.getElementById('spinner-bb84');
+      const text = document.getElementById('btn-bb84-text');
+
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      text.innerText = target === 'hardware' ? "Executing on IBM QPU (Please wait)..." : "Simulating...";
+
+      try {
+        const res = await fetch('/qkd/generate-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            num_qubits: qubits,
+            enable_eve: eve,
+            backend_name: backend || null,
+            target: target
+          })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'QKD execution failed');
+
+        renderBB84Results(data);
+      } catch (err) {
+        alert("BB84 Error: " + err.message);
+      } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        text.innerText = "Execute BB84 on Hardware";
+      }
+    }
+
+    function renderBB84Results(data) {
+      const secBadge = document.getElementById('qkd-security-badge');
+      if (data.security_status === 'SECURE_KEY_ESTABLISHED') {
+        secBadge.className = "mt-1 text-xs font-bold text-emerald-400 font-mono";
+        secBadge.innerText = "SECURE KEY OK";
+        activeKeyHex = data.derived_key_hex;
+        activeKeyOrigin = data.qpu_name;
+      } else {
+        secBadge.className = "mt-1 text-xs font-bold text-rose-500 font-mono";
+        secBadge.innerText = "ABORT: EVE DETECTED";
+        activeKeyHex = null;
+      }
+
+      document.getElementById('qkd-qber-val').innerText = data.qber_percentage;
+      document.getElementById('qkd-sifted-ratio').innerText = `${data.sifted_bits_count} / ${data.num_qubits} (${data.sifted_efficiency})`;
+      document.getElementById('qkd-job-id').innerText = data.job_id || 'simulated';
+      document.getElementById('qkd-job-id').title = data.job_id || 'simulated';
+      document.getElementById('nav-qpu-name').innerText = data.qpu_name || 'IBM QPU';
+
+      document.getElementById('qkd-key-hex').innerText = data.derived_key_hex || 'KEY ABORTED DUE TO EXCESSIVE QBER (>11%)';
+
+      // Populate sifting table
+      const tbody = document.getElementById('bb84-sifting-table');
+      tbody.innerHTML = '';
+
+      const matchSet = new Set(data.matching_bases_indices || []);
+      for (let i = 0; i < data.num_qubits; i++) {
+        const isMatch = matchSet.has(i);
+        const tr = document.createElement('tr');
+        tr.className = isMatch ? "bg-emerald-950/20 text-emerald-300 font-semibold" : "text-slate-400";
+        tr.innerHTML = `
+          <td class="py-1 px-2 font-mono">q[${i}]</td>
+          <td class="py-1 px-2 font-mono">${data.alice_bits[i]}</td>
+          <td class="py-1 px-2 font-mono">${data.alice_bases[i]}</td>
+          <td class="py-1 px-2 font-mono">${data.bob_bases[i]}</td>
+          <td class="py-1 px-2 font-mono">${data.bob_measured_bits[i]}</td>
+          <td class="py-1 px-2 font-mono">${isMatch ? '✅ MATCH' : '❌ DISCARD'}</td>
+          <td class="py-1 px-2 font-mono">${isMatch ? data.alice_bits[i] : '--'}</td>
+        `;
+        tbody.appendChild(tr);
+      }
+    }
+
+    async function runQAOA() {
+      const tickersRaw = document.getElementById('qaoa-tickers').value;
+      const tickers = tickersRaw.split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+      const startDate = document.getElementById('qaoa-start').value;
+      const endDate = document.getElementById('qaoa-end').value;
+      const risk = parseFloat(document.getElementById('qaoa-risk').value);
+      const budget = parseInt(document.getElementById('qaoa-budget').value);
+
+      const btn = document.getElementById('btn-run-qaoa');
+      const spinner = document.getElementById('spinner-qaoa');
+      const text = document.getElementById('btn-qaoa-text');
+
+      btn.disabled = true;
+      spinner.classList.remove('hidden');
+      text.innerText = "Running QAOA Optimizer...";
+
+      try {
+        const res = await fetch('/optimize', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            tickers: tickers,
+            start_date: startDate,
+            end_date: endDate,
+            risk_factor: risk,
+            budget: budget,
+            reps: 1,
+            maxiter: 80
+          })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'QAOA optimization failed');
+
+        renderQAOAResults(data);
+        activePortfolioPayload = data;
+        document.getElementById('payload-plaintext').innerText = JSON.stringify(data, null, 2);
+      } catch (err) {
+        alert("QAOA Error: " + err.message);
+      } finally {
+        btn.disabled = false;
+        spinner.classList.add('hidden');
+        text.innerText = "Execute QAOA Portfolio Solver";
+      }
+    }
+
+    function renderQAOAResults(data) {
+      document.getElementById('res-stocks').innerText = data.selected_stocks.join(' + ');
+      document.getElementById('res-return').innerText = (data.train_return * 100).toFixed(1) + '%';
+      document.getElementById('res-sharpe').innerText = data.train_sharpe.toFixed(2);
+      document.getElementById('res-test-sharpe').innerText = data.test_sharpe.toFixed(2);
+
+      // Render chart
+      const ctx = document.getElementById('portfolioChart').getContext('2d');
+      if (chartInstance) chartInstance.destroy();
+
+      const labels = Object.keys(data.individual_expected_returns);
+      const weights = labels.map(t => data.selected_stocks.includes(t) ? (1 / data.selected_stocks.length) : 0);
+      const bgColors = labels.map(t => data.selected_stocks.includes(t) ? 'rgba(56, 189, 248, 0.8)' : 'rgba(71, 85, 105, 0.4)');
+
+      chartInstance = new Chart(ctx, {
+        type: 'bar',
+        data: {
+          labels: labels,
+          datasets: [{
+            label: 'Optimal Capital Allocation Weight',
+            data: weights,
+            backgroundColor: bgColors,
+            borderColor: 'rgba(255,255,255,0.1)',
+            borderWidth: 1,
+            borderRadius: 6
+          }]
+        },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false }
+          },
+          scales: {
+            y: {
+              beginAtZero: true,
+              max: 1.0,
+              grid: { color: 'rgba(255,255,255,0.05)' },
+              ticks: { color: '#94a3b8' }
+            },
+            x: {
+              grid: { display: false },
+              ticks: { color: '#e2e8f0' }
+            }
+          }
+        }
+      });
+    }
+
+    async function encryptActivePortfolio() {
+      if (!activePortfolioPayload) {
+        alert("Please run QAOA portfolio optimization first!");
+        switchTab('qaoa');
+        return;
+      }
+
+      switchTab('secure');
+
+      try {
+        const res = await fetch('/qkd/encrypt-portfolio', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            payload: activePortfolioPayload,
+            key_hex: activeKeyHex
+          })
+        });
+
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || 'Encryption failed');
+
+        document.getElementById('payload-nonce').innerText = data.encrypted.nonce_hex;
+        document.getElementById('payload-ciphertext').innerText = data.encrypted.ciphertext_hex;
+
+        // Perform client-side decryption test
+        const decRes = await fetch('/qkd/decrypt-payload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nonce_hex: data.encrypted.nonce_hex,
+            ciphertext_hex: data.encrypted.ciphertext_hex,
+            key_hex: data.key_hex
+          })
+        });
+
+        const decData = await decRes.json();
+        if (!decRes.ok) throw new Error(decData.detail || 'Decryption failed');
+
+        document.getElementById('decryption-status').innerText = "✅ 100% Integrity Verified";
+        document.getElementById('decryption-status').className = "text-[10px] text-emerald-400 font-mono font-bold";
+        document.getElementById('payload-decrypted').innerText = JSON.stringify(decData, null, 2);
+      } catch (err) {
+        alert("Secure Pipeline Error: " + err.message);
+      }
+    }
+
+    function copyKey() {
+      if (!activeKeyHex) return;
+      navigator.clipboard.writeText(activeKeyHex);
+      alert("Derived 256-bit Quantum Key copied to clipboard!");
+    }
+  </script>
+</body>
+</html>

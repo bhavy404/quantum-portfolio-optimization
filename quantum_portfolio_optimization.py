@@ -11,19 +11,20 @@ from qiskit_optimization.algorithms import MinimumEigenOptimizer
 
 def main():
     print("=== S1: Download Dataset & Observe Features ===")
-    tickers = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'META']
-    print(f"Downloading data for {tickers}...")
+    tickers = ['TCS.NS', 'INFY.NS', 'HCLTECH.NS', 'WIPRO.NS', 'TECHM.NS']
+    print(f"Downloading past 1 year data for {tickers}...")
     
     # Download dataset
     data = pd.DataFrame()
     for t in tickers:
-        df = yf.download(t, start="2023-01-01", end="2024-01-01", progress=False)
+        df = yf.download(t, period="1y", progress=False)
         # Newer yfinance versions return a MultiIndex dataframe when downloading even a single ticker.
         # We extract 'Close' or 'Adj Close' safely.
         if isinstance(df.columns, pd.MultiIndex):
             data[t] = df[('Close', t)]
         else:
             data[t] = df['Close']
+    data = data.dropna()
         
     # Calculate daily returns
     returns = data.pct_change().dropna()

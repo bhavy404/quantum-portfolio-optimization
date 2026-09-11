@@ -40,14 +40,16 @@ from qiskit_optimization.converters import LinearEqualityToPenalty
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
 
 
+from datetime import datetime, timedelta
+
 # ============================================================
 # CONFIGURATION
 # ============================================================
 
-TICKERS = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
+TICKERS = ["TCS.NS", "INFY.NS", "HCLTECH.NS", "WIPRO.NS", "TECHM.NS"]
 
-START_DATE = "2023-01-01"
-END_DATE = "2024-01-01"
+START_DATE = (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d")
+END_DATE = datetime.now().strftime("%Y-%m-%d")
 
 Q = 0.5
 K = 2

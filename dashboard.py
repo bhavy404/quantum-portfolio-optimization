@@ -13,44 +13,44 @@ import yfinance as yf
 import requests
 import streamlit as st
 
-# Default sample data corresponding exactly to the API response from the screenshot
+# Default sample data corresponding to Indian IT Top-5 stocks (Past 1 Year)
 DEFAULT_DATA = {
-    "selected_stocks": ["AMZN", "META"],
+    "selected_stocks": ["WIPRO.NS", "TECHM.NS"],
     "individual_expected_returns": {
-        "AAPL": 0.5093280509863953,
-        "MSFT": 0.5362141861904132,
-        "GOOGL": 0.6686371880979166,
-        "AMZN": 0.8169691192251061,
-        "META": 1.3892890837744931
+        "TCS.NS": -0.36498524013009837,
+        "INFY.NS": -0.3425487024824885,
+        "HCLTECH.NS": -0.24345715250908423,
+        "WIPRO.NS": -0.2755014410208003,
+        "TECHM.NS": -0.016639843463549138
     },
     "individual_risks_variance": {
-        "AAPL": 0.045854012520229526,
-        "MSFT": 0.07247276864429127,
-        "GOOGL": 0.09735240018974581,
-        "AMZN": 0.11670846727142573,
-        "META": 0.19538792152403536
+        "TCS.NS": 0.056445079253561195,
+        "INFY.NS": 0.07284863520026387,
+        "HCLTECH.NS": 0.07047403008486898,
+        "WIPRO.NS": 0.060256301727792366,
+        "TECHM.NS": 0.07277420696439132
     },
-    "train_return": 1.1031291014997997,
-    "train_risk": 0.11984487827941605,
-    "train_sharpe": 3.186530296786172,
-    "test_return": 0.3709302705788555,
-    "test_risk": 0.07040198077689616,
-    "test_sharpe": 1.3979763912169838
+    "train_return": -0.14607064224217473,
+    "train_risk": 0.05133594018021512,
+    "train_sharpe": -0.6446918479777987,
+    "test_return": -0.15013697920700518,
+    "test_risk": 0.05300155127079764,
+    "test_sharpe": -0.6518426033878184
 }
 
-def fetch_historical_prices(tickers, start_date="2023-01-01", end_date="2024-01-01"):
+def fetch_historical_prices(tickers, period="1y"):
     """Fetch historical daily close prices for specified tickers."""
     data = pd.DataFrame()
     for t in tickers:
         try:
-            df = yf.download(t, start=start_date, end=end_date, progress=False)
+            df = yf.download(t, period=period, progress=False)
             if isinstance(df.columns, pd.MultiIndex):
                 data[t] = df[('Close', t)]
             else:
                 data[t] = df['Close']
         except Exception as e:
             print(f"Warning: Could not fetch data for {t}: {e}")
-    return data
+    return data.dropna()
 
 def generate_matplotlib_dashboard(data=DEFAULT_DATA, save_path="top5_stocks_analysis.png", top_only=True):
     """Generate high-quality static Matplotlib visualization dashboard focused on Top Selected Stocks."""
@@ -101,8 +101,14 @@ def generate_matplotlib_dashboard(data=DEFAULT_DATA, save_path="top5_stocks_anal
     ax1.set_ylabel("Expected Annual Return", fontsize=10, color='#8B949E')
     ax1.grid(True, linestyle='--', alpha=0.2, color='#8B949E')
     if x_risks and y_returns:
-        ax1.set_xlim(min(x_risks)*0.75, max(x_risks)*1.3)
-        ax1.set_ylim(min(y_returns)*0.75, max(y_returns)*1.2)
+        all_x = x_risks + [data["train_risk"]]
+        all_y = y_returns + [data["train_return"]]
+        min_x, max_x = min(all_x), max(all_x)
+        min_y, max_y = min(all_y), max(all_y)
+        dx = (max_x - min_x) * 0.25 if max_x > min_x else 0.05
+        dy = (max_y - min_y) * 0.25 if max_y > min_y else 0.05
+        ax1.set_xlim(min_x - dx, max_x + dx)
+        ax1.set_ylim(min_y - dy, max_y + dy)
 
     # 2. Individual Expected Returns & Risk Bar Charts (Top Selected Stocks)
     ax2 = plt.subplot(2, 2, 2)
@@ -172,7 +178,7 @@ def generate_matplotlib_dashboard(data=DEFAULT_DATA, save_path="top5_stocks_anal
             color = palette[i % len(palette)]
             ax4.plot(norm_data.index, norm_data[t], label=f"#{i+1} {t}", linewidth=2.8, color=color)
             
-        ax4.set_title(f"Top {len(selected_stocks)} Historical Growth Trends (Base=100: 2023-2024)", fontsize=13, fontweight='bold', color='#E6EDF3', pad=12)
+        ax4.set_title(f"Top {len(selected_stocks)} Historical Growth Trends (Base=100: Past 1 Year)", fontsize=13, fontweight='bold', color='#E6EDF3', pad=12)
         ax4.set_ylabel("Normalized Growth", fontsize=10, color='#8B949E')
         ax4.legend(loc='upper left', facecolor='#21262D', edgecolor='#30363D', fontsize=9)
         ax4.grid(True, linestyle='--', alpha=0.15)
@@ -216,7 +222,7 @@ def run_streamlit_dashboard():
     
     # Sidebar Controls
     st.sidebar.header("⚙️ Optimization Parameters")
-    tickers_input = st.sidebar.text_input("Input Tickers (5 Stocks)", "AAPL, MSFT, GOOGL, AMZN, META")
+    tickers_input = st.sidebar.text_input("Input Tickers (5 Stocks)", "TCS.NS, INFY.NS, HCLTECH.NS, WIPRO.NS, TECHM.NS")
     tickers_all = [t.strip().upper() for t in tickers_input.split(",")]
     
     col_sb1, col_sb2 = st.sidebar.columns(2)

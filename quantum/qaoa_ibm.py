@@ -14,8 +14,9 @@ import os
 from collections import Counter
 
 from dotenv import load_dotenv
-from qiskit import QuantumCircuit, transpile
+from qiskit import QuantumCircuit
 from qiskit.circuit import Parameter
+from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
 
 
@@ -226,11 +227,8 @@ def run_hardware_test():
 
     print("Transpiling for IBM hardware...")
 
-    isa_circuit = transpile(
-        circuit,
-        backend=backend,
-        optimization_level=1,
-    )
+    pm = generate_preset_pass_manager(optimization_level=1, backend=backend)
+    isa_circuit = pm.run(circuit)
 
     print()
     print("Transpiled circuit:")

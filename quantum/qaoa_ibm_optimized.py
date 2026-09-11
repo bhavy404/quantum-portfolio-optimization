@@ -15,8 +15,9 @@ from collections import Counter
 from typing import List, Tuple, Dict
 from dotenv import load_dotenv
 
-from qiskit import QuantumCircuit, transpile
+from qiskit import QuantumCircuit
 from qiskit.circuit import Parameter
+from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
 from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
 from scipy.optimize import minimize
 
@@ -163,7 +164,8 @@ def run_hardware_optimization():
     circuit = build_qaoa_circuit()
 
     print(f"Transpiling parameterized circuit for '{backend.name}' (ISA)...")
-    isa_circuit = transpile(circuit, backend=backend, optimization_level=1)
+    pm = generate_preset_pass_manager(optimization_level=1, backend=backend)
+    isa_circuit = pm.run(circuit)
     print(f"  Transpiled Qubits : {isa_circuit.num_qubits}")
     print(f"  Transpiled Depth  : {isa_circuit.depth()}")
     print(f"  Transpiled Params : {isa_circuit.parameters}")

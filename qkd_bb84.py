@@ -154,7 +154,7 @@ class BB84Session:
 
         # Select physical backend
         try:
-            if self.backend_name:
+            if self.backend_name and self.backend_name.lower() not in ("least_busy", "auto", "none", ""):
                 backend = service.backend(self.backend_name)
             else:
                 backend = service.least_busy(simulator=False, operational=True)

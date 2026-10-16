@@ -33,8 +33,23 @@ def _fail(run_id: int, message: str):
 def _run(run_id: int, user_id: int, req: dict):
     try:
         result = compute(req)
-        u = db.one("SELECT key_id FROM users WHERE id=?", (user_id,))
-        key_id = u["key_id"] or keybank.assign_key(user_id)
+        key_id, key_note = None, None
+        if req.get("hw_key"):  # a fresh BB84 key made on the IBM processor just for this result
+            try:
+                ks = keybank.make_key_batched()
+                if ks["status"] == "SECURE_KEY_ESTABLISHED":
+                    key_id = ks["key_id"]
+                else:
+                    key_note = ks["reason"]
+                    result["key_attempt"] = {k2: ks[k2] for k2 in ("backend", "qber", "qber_upper95", "secret_bits", "job_ids")}
+            except Exception as exc:
+                traceback.print_exc()
+                key_note = f"The IBM key step failed ({exc.__class__.__name__})."
+        if key_id is None:
+            u = db.one("SELECT key_id FROM users WHERE id=?", (user_id,))
+            key_id = u["key_id"] or keybank.assign_key(user_id)
+        result["key"] = {**keybank.key_summary(key_id), "fresh_for_this_result": bool(req.get("hw_key")) and key_note is None,
+                         "fallback_reason": key_note}
         enc = keybank.encrypt(user_id, key_id, result)
         db.execute("UPDATE runs SET status='done', key_id=?, nonce_hex=?, ciphertext_hex=? WHERE id=?",
                    (key_id, enc["nonce_hex"], enc["ciphertext_hex"], run_id))
@@ -62,7 +77,7 @@ def compute(req: dict) -> dict:
     train, test = ret.iloc[:cut], ret.iloc[cut:]
     mu, sigma = train.mean().values * an.TD, train.cov().values * an.TD
 
-    sol = solver.solve(mu, sigma, k, q, engine=req["engine"], reps=req["reps"], maxiter=req["maxiter"])
+    sol = solver.solve(mu, sigma, k, q, engine=req["engine"], reps=req["reps"], maxiter=req["maxiter"], mixer=req.get("mixer", "xy"))
     chosen = [usable[i] for i in sol["idx"]]
     exact_names = [usable[i] for i in sol["exact"]["idx"]]
     info = universe.info(usable)
@@ -99,7 +114,7 @@ def compute(req: dict) -> dict:
         "chosen": chosen, "allocation": allocation, "cash_left": round(amount - sum(a["invest"] for a in allocation), 2),
         "quantum": {
             "label": sol["label"], "engine": sol["engine"], "backend": sol["backend"], "job_id": sol["job_id"],
-            "qubits": sol["qubits"], "reps": sol["reps"], "circuit_depth": sol["circuit_depth"], "cx_gates": sol["cx_gates"],
+            "qubits": sol["qubits"], "reps": sol["reps"], "mixer": sol["mixer"], "circuit_depth": sol["circuit_depth"], "cx_gates": sol["cx_gates"],
             "seconds": sol["seconds"], "note": sol["note"], "feasible_baskets": sol["feasible_baskets"],
             "feasible_mass": sol["feasible_mass"], "matches_exact": sol["matches_exact"], "rank": sol["rank"],
             "shots": sol["shots"], "p_best": sol["p_best"], "p_best_blind": sol["p_best_blind"],

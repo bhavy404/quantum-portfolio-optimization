@@ -18,7 +18,9 @@ _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _hash(password: str, salt: bytes) -> bytes:
-    return hashlib.scrypt(password.encode(), salt=salt, n=2 ** 14, r=8, p=1, dklen=32)
+    # cryptography's scrypt matches hashlib.scrypt but also works on Pythons built without it
+    from cryptography.hazmat.primitives.kdf.scrypt import Scrypt
+    return Scrypt(salt=salt, length=32, n=2 ** 14, r=8, p=1).derive(password.encode())
 
 
 def register(email: str, password: str, name: str = "") -> dict:

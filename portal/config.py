@@ -1,5 +1,12 @@
 """Runtime configuration for the QPortal web app (all values come from environment variables)."""
 import os
+
+try:  # read settings (IBM token etc.) from the repository's .env file
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 import secrets
 from pathlib import Path
 
@@ -17,6 +24,7 @@ SYNTHETIC = os.getenv("QPORTAL_SYNTHETIC", "0") == "1"
 KEY_TARGET = os.getenv("QPORTAL_KEY_TARGET", "simulator").lower()
 IBM_TOKEN = os.getenv("IBM_QUANTUM_TOKEN", "").strip()
 IBM_BACKEND = os.getenv("IBM_BACKEND_NAME", "ibm_fez").strip() or "ibm_fez"
+IBM_INSTANCE = os.getenv("IBM_QUANTUM_INSTANCE", "").strip()
 
 HISTORY_YEARS = int(os.getenv("QPORTAL_HISTORY_YEARS", "3"))
 PRICE_MAX_AGE_HOURS = int(os.getenv("QPORTAL_PRICE_MAX_AGE_HOURS", "20"))

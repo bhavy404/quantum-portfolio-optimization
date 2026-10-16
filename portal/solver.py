@@ -12,6 +12,10 @@ QAOA engine
   of times, exactly as hardware would. Exact simulation makes 12-qubit runs take seconds instead of minutes.
 * The hardware engine takes the trained angles, builds the same circuit in Qiskit and runs it on an IBM
   quantum processor.
+* Two circuit types. "x" is the textbook QAOA (X mixer, equal superposition of all 2^n baskets), which wastes
+  most of its weight on baskets with the wrong number of stocks. "xy" is the constraint-preserving version:
+  it starts in an equal superposition of only the valid baskets (a Dicke state) and mixes with XY (partial
+  swap) gates on a ring, which never change how many stocks are held. Every measured basket is valid.
 * The result reports how likely the circuit made the best basket versus blind guessing. That number, not
   "it found the answer", is the honest measure of what the quantum step contributed.
 """
@@ -20,7 +24,7 @@ import time
 
 import numpy as np
 
-from . import config
+from . import config, qlock
 
 SHOTS = 2048
 RESTARTS = 6
@@ -67,6 +71,10 @@ def _energies(mu_s, sig_s, k, q):
 
 
 def _qubo_program(mu_s, sig_s, k, q, penalty):
+    return qlock.run(_qubo_program_unlocked, mu_s, sig_s, k, q, penalty)
+
+
+def _qubo_program_unlocked(mu_s, sig_s, k, q, penalty):
     """The same QUBO as a Qiskit QuadraticProgram (used for the circuit and its Ising operator)."""
     from qiskit_optimization import QuadraticProgram
 
@@ -91,8 +99,49 @@ def _apply_mixer(psi, beta, n):
     return psi.reshape(-1)
 
 
-def _state(params, e_norm, n, reps):
+def ring_edges(n):
+    """Edges of the XY mixer ring, in application order (even edges first so hardware can run them in parallel)."""
+    if n == 2:
+        return [(0, 1)]
+    return [(i, i + 1) for i in range(0, n - 1, 2)] + [(i, (i + 1) % n) for i in range(1, n, 2)]
+
+
+_XY_CACHE = {}
+
+
+def _xy_index(n):
+    if n not in _XY_CACHE:
+        z = np.arange(2 ** n)
+        _XY_CACHE[n] = [(z[((z >> i) & 1) != ((z >> j) & 1)], (1 << i) | (1 << j)) for i, j in ring_edges(n)]
+    return _XY_CACHE[n]
+
+
+def _apply_xy_mixer(psi, beta, n):
+    """exp(-i*beta*(XX+YY)/2) on every ring edge. Moves amplitude between 01 and 10 only, so the number of
+    ones (stocks held) never changes."""
+    c, s = np.cos(beta), -1j * np.sin(beta)
+    for d, mask in _xy_index(n):
+        new = psi.copy()
+        new[d] = c * psi[d] + s * psi[d ^ mask]
+        psi = new
+    return psi
+
+
+def _dicke_vector(n, k):
+    z = np.arange(2 ** n)
+    ones = np.array([bin(v).count("1") for v in z])
+    v = (ones == k).astype(complex)
+    return v / np.linalg.norm(v)
+
+
+def _state(params, e_norm, n, reps, mixer="x", k=None):
     gammas, betas = params[:reps], params[reps:]
+    if mixer == "xy":
+        psi = _dicke_vector(n, k)
+        for g, b in zip(gammas, betas):
+            psi = psi * np.exp(-1j * g * e_norm)
+            psi = _apply_xy_mixer(psi, b, n)
+        return psi
     psi = np.full(2 ** n, 1 / np.sqrt(2 ** n), dtype=complex)
     for g, b in zip(gammas, betas):
         psi = psi * np.exp(-1j * g * e_norm)
@@ -100,13 +149,13 @@ def _state(params, e_norm, n, reps):
     return psi
 
 
-def _train(e_norm, n, reps, maxiter, seed=7):
+def _train(e_norm, n, reps, maxiter, seed=7, mixer="x", k=None):
     from scipy.optimize import minimize
 
     rng = np.random.default_rng(seed)
 
     def cost(p):
-        pr = np.abs(_state(p, e_norm, n, reps)) ** 2
+        pr = np.abs(_state(p, e_norm, n, reps, mixer, k)) ** 2
         return float(pr @ e_norm)
 
     best = None
@@ -118,13 +167,59 @@ def _train(e_norm, n, reps, maxiter, seed=7):
     return best.x, float(best.fun)
 
 
-def _qiskit_circuit(qp, params, reps, e_range):
+def dicke_circuit(n, k):
+    """Equal superposition of all n-bit strings with exactly k ones (Baertschi-Eidenbenz construction,
+    checked against the exact state for every n <= 12)."""
+    from math import acos, sqrt
+
+    from qiskit import QuantumCircuit
+
+    qc = QuantumCircuit(n)
+    for i in range(n - k, n):
+        qc.x(i)
+
+    def block(m, kk):  # acts on the first m qubits; bottom qubit = m-1
+        bot = m - 1
+        qc.cx(bot - 1, bot)
+        qc.cry(2 * acos(sqrt(1 / m)), bot, bot - 1)
+        qc.cx(bot - 1, bot)
+        for l in range(2, kk + 1):
+            a, mid = bot - l, bot - l + 1
+            th = 2 * acos(sqrt(l / m))
+            qc.cx(a, bot)
+            qc.ry(th / 2, a)
+            qc.ccx(bot, mid, a)
+            qc.ry(-th / 2, a)
+            qc.ccx(bot, mid, a)
+            qc.cx(a, bot)
+
+    for m in range(n, k, -1):
+        block(m, k)
+    for m in range(k, 1, -1):
+        block(m, m - 1)
+    return qc
+
+
+def _qiskit_circuit(qp, params, reps, e_range, mixer="x", k=None):
     """The trained QAOA circuit in Qiskit (angles mapped to Qiskit's convention)."""
+    gammas, betas = params[:reps], params[reps:]
+    if mixer == "xy":
+        from qiskit import QuantumCircuit
+        from qiskit.circuit.library import PauliEvolutionGate, XXPlusYYGate
+
+        op, _ = qp.to_ising()
+        n = op.num_qubits
+        circ = QuantumCircuit(n)
+        circ.compose(dicke_circuit(n, k), inplace=True)
+        for g, b in zip(gammas, betas):
+            circ.append(PauliEvolutionGate(op, time=float(g / e_range)), range(n))
+            for i, j in ring_edges(n):
+                circ.append(XXPlusYYGate(2 * float(b)), [i, j])
+        return circ
     from qiskit.circuit.library import QAOAAnsatz
 
     op, _ = qp.to_ising()
     circ = QAOAAnsatz(op, reps=reps)
-    gammas, betas = params[:reps], params[reps:]
     values = {}
     for p in circ.parameters:
         idx = int(p.name[p.name.index("[") + 1:-1])
@@ -132,35 +227,45 @@ def _qiskit_circuit(qp, params, reps, e_range):
     return circ.assign_parameters(values)
 
 
-def _depth(qp, params, reps, e_range):
+def _depth(qp, params, reps, e_range, mixer="x", k=None):
+    return qlock.run(_depth_unlocked, qp, params, reps, e_range, mixer, k)
+
+
+def _depth_unlocked(qp, params, reps, e_range, mixer="x", k=None):
     try:
         from qiskit import transpile
 
-        circ = _qiskit_circuit(qp, params, reps, e_range).decompose(reps=3)
+        circ = _qiskit_circuit(qp, params, reps, e_range, mixer, k).decompose(reps=3)
         t = transpile(circ, basis_gates=["cx", "rz", "sx", "x"], optimization_level=1)
         return int(t.depth()), int(t.count_ops().get("cx", 0))
     except Exception:
         return None, None
 
 
-def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS):
+def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
     from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
 
     if not config.IBM_TOKEN:
         raise RuntimeError("IBM Quantum is not configured on this server.")
-    circ = _qiskit_circuit(qp, params, reps, e_range)
-    circ.measure_all()
-    service = QiskitRuntimeService(channel="ibm_quantum_platform", token=config.IBM_TOKEN)
+    kwargs = {"channel": "ibm_quantum_platform", "token": config.IBM_TOKEN}
+    if config.IBM_INSTANCE:
+        kwargs["instance"] = config.IBM_INSTANCE
+    service = QiskitRuntimeService(**kwargs)
     backend = service.backend(config.IBM_BACKEND)
-    isa = generate_preset_pass_manager(optimization_level=1, backend=backend).run(circ)
+    def build():
+        circ = _qiskit_circuit(qp, params, reps, e_range, mixer, k)
+        circ.measure_all()
+        return generate_preset_pass_manager(optimization_level=1, backend=backend).run(circ)
+
+    isa = qlock.run(build)  # building and compiling happen on the Qiskit thread; waiting on IBM does not
     job = SamplerV2(mode=backend).run([isa], shots=shots)
     counts = job.result()[0].data.meas.get_counts()
     return counts, backend.name, job.job_id(), int(isa.depth())
 
 
 # ----- public entry point --------------------------------------------------------------------------
-def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100):
+def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
     mu_s, sig_s = normalise(mu, sigma)
     n = len(mu_s)
     t0 = time.time()
@@ -168,7 +273,7 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100):
     best_exact = ranked[0]
     rank_of = {combo: r + 1 for r, (_, combo) in enumerate(ranked)}
     out = {
-        "engine": engine, "qubits": n, "reps": reps, "maxiter": maxiter,
+        "engine": engine, "qubits": n, "reps": reps, "maxiter": maxiter, "mixer": mixer,
         "exact": {"idx": list(best_exact[1]), "fval": best_exact[0]},
         "feasible_baskets": len(ranked), "backend": None, "job_id": None, "circuit_depth": None,
         "cx_gates": None, "samples": [], "note": "", "shots": 0,
@@ -180,16 +285,21 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100):
         return out
 
     E, feasible, penalty, X = _energies(mu_s, sig_s, k, q)
-    e_range = float(E.max() - E.min()) or 1.0
-    e_norm = (E - E.min()) / e_range
-    params, _ = _train(e_norm, n, reps, maxiter)
-    probs = np.abs(_state(params, e_norm, n, reps)) ** 2
+    if mixer == "xy":
+        # The state never leaves the valid baskets, where the penalty is a constant. Scale by the valid range only.
+        e_range = float(E[feasible].max() - E[feasible].min()) or 1.0
+        e_norm = (E - E[feasible].min()) / e_range
+    else:
+        e_range = float(E.max() - E.min()) or 1.0
+        e_norm = (E - E.min()) / e_range
+    params, _ = _train(e_norm, n, reps, maxiter, mixer=mixer, k=k)
+    probs = np.abs(_state(params, e_norm, n, reps, mixer, k)) ** 2
     qp = _qubo_program(mu_s, sig_s, k, q, penalty)
-    out["circuit_depth"], out["cx_gates"] = _depth(qp, params, reps, e_range)
+    out["circuit_depth"], out["cx_gates"] = _depth(qp, params, reps, e_range, mixer, k)
     out["shots"] = SHOTS
 
     if engine == "qaoa_hw":
-        counts, name, job_id, hw_depth = _run_hardware(qp, params, reps, e_range, n)
+        counts, name, job_id, hw_depth = _run_hardware(qp, params, reps, e_range, n, mixer=mixer, k=k)
         total = sum(counts.values())
         measured = {}
         for bits, c in counts.items():

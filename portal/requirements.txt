@@ -13,3 +13,4 @@ qiskit>=1.0
 qiskit-aer
 qiskit-optimization
 qiskit-ibm-runtime
+qiskit-algorithms

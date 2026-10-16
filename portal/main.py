@@ -18,6 +18,14 @@ from . import auth, config, db, jobs, keybank, prices, universe
 
 STATIC = Path(__file__).resolve().parent / "static"
 app = FastAPI(title="QPortal", version="2.0")
+
+
+@app.exception_handler(Exception)
+async def _unhandled(request, exc):
+    import traceback
+    from fastapi.responses import JSONResponse
+    traceback.print_exc()
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {type(exc).__name__}: {str(exc)[:160]}"})
 if config.ALLOWED_ORIGINS:
     app.add_middleware(CORSMiddleware, allow_origins=config.ALLOWED_ORIGINS, allow_credentials=True,
                        allow_methods=["*"], allow_headers=["*"])
@@ -61,6 +69,8 @@ class Recommend(BaseModel):
     engine: str = "qaoa_sim"
     reps: int = Field(default=2, ge=1, le=4)
     maxiter: int = Field(default=100, ge=20, le=300)
+    mixer: str = "xy"
+    hw_key: bool = False
 
     @field_validator("symbols")
     @classmethod
@@ -68,6 +78,13 @@ class Recommend(BaseModel):
         v = list(dict.fromkeys(s.strip().upper() for s in v if s and s.strip()))
         if not (config.MIN_SHORTLIST <= len(v) <= config.MAX_SHORTLIST):
             raise ValueError(f"Choose between {config.MIN_SHORTLIST} and {config.MAX_SHORTLIST} stocks.")
+        return v
+
+    @field_validator("mixer")
+    @classmethod
+    def _mixer(cls, v):
+        if v not in ("xy", "x"):
+            raise ValueError("Unknown circuit type.")
         return v
 
     @field_validator("engine")
@@ -90,7 +107,12 @@ def health():
 @app.post("/api/auth/register")
 def register(body: Signup):
     user = auth.register(body.email, body.password, body.name)
-    keybank.assign_key(user["id"])
+    try:
+        keybank.assign_key(user["id"])
+    except Exception as exc:  # signup must not fail because of the key step; it is retried at first save
+        import traceback
+        traceback.print_exc()
+        print(f"[register] key assignment deferred: {exc}")
     full = db.one("SELECT id,email,name FROM users WHERE id=?", (user["id"],))
     return {"token": auth.make_token(full), "user": full}
 
@@ -154,6 +176,8 @@ def recommend(body: Recommend, user=Depends(auth.current_user)):
         raise HTTPException(400, "Pick fewer stocks to hold than you shortlisted.")
     if body.engine == "qaoa_hw" and not config.IBM_TOKEN:
         raise HTTPException(400, "The IBM quantum processor is not available on this server. Choose the simulator.")
+    if body.hw_key and not config.IBM_TOKEN:
+        raise HTTPException(400, "The IBM quantum processor is not available on this server.")
     return {"run_id": jobs.submit(user, body.model_dump())}
 
 

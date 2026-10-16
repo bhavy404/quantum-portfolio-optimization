@@ -18,6 +18,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from . import db
+from . import qlock
 from .config import BANK_TARGET_KEYS, IBM_BACKEND, IBM_TOKEN, KEY_MIN_SECRET_BITS, KEY_TARGET, SERVER_SECRET
 
 QBER_LIMIT = 0.11
@@ -45,6 +46,11 @@ def _upper95(errors: int, n: int) -> float:
 
 
 def generate_key(target: str = None, enable_eve: bool = False) -> dict:
+    """Run BB84 sessions on the dedicated Qiskit thread (hardware sessions wait on IBM from there too)."""
+    return qlock.run(_generate_key, target, enable_eve)
+
+
+def _generate_key(target: str = None, enable_eve: bool = False) -> dict:
     """Run BB84 sessions until enough secret bits exist. Returns a summary and stores the key unless aborted."""
     from qkd_bb84 import BB84Session  # lives at the repository root
 
@@ -88,8 +94,49 @@ def generate_key(target: str = None, enable_eve: bool = False) -> dict:
     return summary
 
 
+def make_key_batched(execute=None) -> dict:
+    """One BB84 key from ONE batched quantum job (see bb84_batch). Used when a user asks for a fresh quantum key
+    for a single result. `execute` defaults to the IBM processor; tests pass a simulator."""
+    from . import bb84_batch
+
+    execute = execute or bb84_batch.execute_hardware
+    out = bb84_batch.run(execute)
+    secret = out["secret"]
+    errors, sample = out["errors"], out["sample_bits"]
+    qber = errors / sample if sample else 1.0
+    upper = _upper95(errors, sample)
+    ok = len(secret) >= KEY_MIN_SECRET_BITS and upper <= QBER_LIMIT
+    source = "hardware" if out["backend"] != "Qiskit Aer simulator" else "simulator"
+    stored_source = source + "-result"  # marks a key made for ONE result; the bank never hands it to anyone else
+    summary = {
+        "status": "SECURE_KEY_ESTABLISHED" if ok else "ABORTED",
+        "reason": None if ok else ("Error rate too high to trust this key (hardware noise or tampering)." if upper > QBER_LIMIT else "Not enough clean key bits."),
+        "backend": out["backend"], "source": source, "sessions": out["sessions"], "raw_qubits": out["raw_qubits"],
+        "sifted_bits": out["sifted_bits"], "secret_bits": len(secret), "qber": qber, "qber_upper95": upper,
+        "job_ids": [out["job_id"]] if out["job_id"] else [],
+    }
+    if ok:
+        material = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=b"qportal-bb84-bank").derive(_pack(secret))
+        summary["key_id"] = db.execute(
+            "INSERT INTO keys(source,backend,sessions,raw_qubits,sifted_bits,secret_bits,qber,job_ids,material_hex) VALUES (?,?,?,?,?,?,?,?,?)",
+            (stored_source, summary["backend"], out["sessions"], out["raw_qubits"], out["sifted_bits"], len(secret), qber,
+             json.dumps(summary["job_ids"]), material.hex()),
+        )
+    return summary
+
+
+def key_summary(key_id: int) -> dict:
+    """What to show the user about the key that protects a result (never the key itself)."""
+    row = db.one("SELECT source,backend,sessions,raw_qubits,sifted_bits,secret_bits,qber,job_ids FROM keys WHERE id=?", (key_id,))
+    if not row:
+        return {}
+    row["job_ids"] = json.loads(row["job_ids"] or "[]")
+    row["source"] = row["source"].replace("-result", "")
+    return row
+
+
 def unassigned_count() -> int:
-    row = db.one("SELECT count(*) AS c FROM keys WHERE id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL)")
+    row = db.one("SELECT count(*) AS c FROM keys WHERE source NOT LIKE '%-result' AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL)")
     return int(row["c"])
 
 
@@ -113,7 +160,7 @@ def top_up_async():
 def assign_key(user_id: int) -> int:
     """Give the user the oldest unused key (or make one now)."""
     with _bank_lock:
-        row = db.one("SELECT id FROM keys WHERE id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL) ORDER BY id LIMIT 1")
+        row = db.one("SELECT id FROM keys WHERE source NOT LIKE '%-result' AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL) ORDER BY id LIMIT 1")
         key_id = row["id"] if row else generate_key().get("key_id")
         if not key_id:
             raise RuntimeError("Could not create a secure key right now. Please try again.")

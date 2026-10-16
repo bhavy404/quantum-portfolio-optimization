@@ -39,7 +39,7 @@
     rows: [], extra: {}, asOf: null,
     shortlist: store.get("qp_short", []),
     answers: store.get("qp_answers", {}), q: store.get("qp_q", 0.5), k: store.get("qp_k", null),
-    amount: store.get("qp_amount", 100000), engine: "qaoa_sim",
+    amount: store.get("qp_amount", 100000), engine: "qaoa_sim", mixer: "xy", hwKey: false,
     sort: { key: "ratio", dir: -1 }, filter: { text: "", sector: "", risk: "" },
   };
   let charts = [];
@@ -83,10 +83,10 @@
       h("a", { href: "#/security", "aria-current": active === "security" ? "page" : null }, "Security")) : h("div", { class: "nav" });
     const who = S.token ? h("div", { class: "who" }, h("span", null, S.user && (S.user.name || S.user.email)),
       h("button", { class: "btn alt small", onclick: logout }, "Log out")) : null;
-    $app.replaceChildren(
+    $app.replaceChildren(...[
       S.health && S.health.synthetic ? h("div", { class: "banner", role: "alert" }, "TEST DATA – these prices are made up and only used for testing.") : null,
       h("header", { class: "topbar" }, h("div", { class: "wrap" }, h("a", { class: "brand", href: "#/" }, h("i"), "QPortal"), nav, who)),
-      h("main", { class: "wrap", id: "main" }, content));
+      h("main", { class: "wrap", id: "main" }, content)].filter(Boolean));
     window.scrollTo(0, 0);
   }
 
@@ -347,7 +347,7 @@
     const run = async (ev) => {
       ev.target.disabled = true; err.textContent = "";
       try {
-        const r = await api("/api/recommend", { method: "POST", body: { symbols: S.shortlist, k: S.k, q: S.q, amount: S.amount, engine: S.engine } });
+        const r = await api("/api/recommend", { method: "POST", body: { symbols: S.shortlist, k: S.k, q: S.q, amount: S.amount, engine: S.engine, mixer: S.mixer, hw_key: !!(S.hwKey && S.health.ibm_configured) } });
         location.hash = "#/result/" + r.run_id;
       } catch (ex) { err.textContent = ex.message; ev.target.disabled = false; }
     };
@@ -370,6 +370,11 @@
               h("button", { class: "btn alt small", "aria-label": "More", onclick: () => { if (S.k < max) { S.k++; save(); preview(); } } }, "+"))),
             h("label", { class: "field", style: "margin-top:14px" }, h("span", null, "Amount to invest (₹)"), h("input", { type: "number", min: 1000, step: 1000, value: S.amount, oninput: (e) => { S.amount = Math.max(1000, +e.target.value || 1000); save(); } })),
             h("label", { class: "field" }, h("span", null, "Method"), h("select", { onchange: (e) => { S.engine = e.target.value; } }, engines.map(([v, t]) => h("option", { value: v }, t)))),
+            h("label", { class: "field" }, h("span", null, "Circuit type"), h("select", { onchange: (e) => { S.mixer = e.target.value; } },
+              h("option", { value: "xy" }, "Valid mixes only (recommended)"), h("option", { value: "x" }, "Standard QAOA (shallower, good for real hardware)")),
+              h("small", { class: "muted" }, "The first builds only mixes with your chosen number of stocks and does far better, but its circuit is deeper. On a real quantum processor, noise grows with depth, so use 8 stocks or fewer there, or pick Standard.")),
+            S.health.ibm_configured ? h("label", { class: "opt", style: "margin:6px 0 10px" }, h("input", { type: "checkbox", checked: S.hwKey, onchange: (e) => { S.hwKey = e.target.checked; } }),
+              h("span", null, "Protect this result with a fresh quantum key made on the IBM quantum processor (adds a few minutes)")) : null,
             err, h("button", { class: "btn", style: "width:100%", onclick: run }, "Analyse my shortlist"))))), "flow");
     makeChart();
     preview();
@@ -377,7 +382,7 @@
 
   // ---------- result ----------
   async function viewResult(id) {
-    shell(h("div", { class: "waiting" }, h("div", { class: "spinner" }), h("h2", null, "Analysing your shortlist"), h("p", { class: "muted" }, "This usually takes under a minute.")), "flow");
+    shell(h("div", { class: "waiting" }, h("div", { class: "spinner" }), h("h2", null, "Analysing your shortlist"), h("p", { class: "muted" }, S.hwKey && S.health.ibm_configured ? "Making a quantum key on the IBM processor can take a few minutes." : "This usually takes under a minute.")), "flow");
     const t0 = Date.now();
     const poll = async () => {
       let r;
@@ -446,6 +451,7 @@
         R.dropped.length ? h("p", { class: "muted" }, "Left out for too little price history: " + R.dropped.map(short).join(", ")) : null),
 
       how(R),
+      protect(R),
       h("p", { class: "disclaimer" }, `Equal amounts in each stock, rebalanced daily. Growth is the average yearly gain, ups and downs is yearly volatility. The Nifty 50 line uses the index, not an investable fund. Picks use the first 70% of days (to ${R.data.train_until}); the last 30% (from ${R.data.test_from}) are shown separately. Past results do not predict future results. This is an educational tool, not investment advice.`),
       h("div", { class: "noprint" }, h("a", { class: "btn alt", href: "#/" }, "Change my shortlist"), " ", h("a", { class: "btn alt", href: "#/history" }, "My saved results"))), "flow");
 
@@ -484,21 +490,39 @@
     return box;
   }
 
+  function protect(R) {
+    const k = R.key;
+    if (!k || !k.source) return null;
+    const hw = k.source === "hardware";
+    return h("details", { class: "panel" }, h("summary", null, "How this result is protected"),
+      h("p", null, hw
+        ? `This result is encrypted with a key built from BB84 quantum key exchange run on a real IBM quantum processor (${k.backend}).${k.fresh_for_this_result ? " The key was made fresh for this result." : ""}`
+        : "This result is encrypted with a key built from BB84 quantum key exchange run on a quantum circuit simulator."),
+      R.key.fallback_reason ? h("p", { class: "note warn" }, `We could not make a fresh IBM key for this result (${R.key.fallback_reason}), so your regular saved key was used instead.`) : null,
+      h("dl", { class: "kv" },
+        h("dt", null, "Key made on"), h("dd", null, k.backend),
+        k.job_ids && k.job_ids.length ? [h("dt", null, "IBM job"), h("dd", null, k.job_ids.join(", "))] : null,
+        h("dt", null, "Qubits sent"), h("dd", null, `${k.raw_qubits} in ${k.sessions} sessions`),
+        h("dt", null, "Secret bits kept"), h("dd", null, String(k.secret_bits)),
+        h("dt", null, "Error rate seen"), h("dd", null, pct(k.qber, 1) + " (keys are rejected above 11%)")),
+      h("p", { class: "muted", style: "margin-top:12px" }, "Honest limit: the sender and receiver in the key exchange are both this server, so it is not a quantum link to your device. The final encryption key also mixes in a server secret, and your result is stored encrypted with AES-256."));
+  }
+
   function how(R) {
     const q = R.quantum, sampled = q.engine !== "classical";
     const top = q.samples.slice(0, 6);
     return h("details", { class: "panel" }, h("summary", null, "How this was chosen"),
       h("p", null, sampled
-        ? `A quantum-computing method called QAOA (${q.label.toLowerCase().includes("ibm") ? "run on an IBM quantum processor" : "run on a simulator"}) searched all ways to pick ${R.params.k} of your ${q.qubits} stocks. It uses ${q.qubits} qubits${q.circuit_depth ? ` and a circuit about ${q.circuit_depth} steps deep` : ""}. The circuit was measured ${q.shots.toLocaleString("en-IN")} times, and we kept the lowest-cost valid mix it produced.`
+        ? `A quantum-computing method called QAOA (${q.label.toLowerCase().includes("ibm") ? "run on an IBM quantum processor" : "run on a simulator"}) searched all ways to pick ${R.params.k} of your ${q.qubits} stocks. It uses ${q.qubits} qubits${q.circuit_depth ? ` and a circuit about ${q.circuit_depth} steps deep` : ""}. ${q.mixer === "xy" ? "The circuit is built so it only ever considers mixes with exactly the number of stocks you asked for. " : ""}It was measured ${q.shots.toLocaleString("en-IN")} times, and we kept the lowest-cost valid mix it produced.`
         : "This result used an exact classical search over every possible mix."),
       sampled ? h("dl", { class: "kv" },
-        h("dt", null, "Valid mixes"), h("dd", null, `${pct(q.feasible_mass, 0)} of measurements (blind guessing: ${pct(q.feasible_baskets / 2 ** q.qubits, 0)})`),
+        h("dt", null, "Valid mixes"), h("dd", null, q.mixer === "xy" && !q.job_id ? `${pct(q.feasible_mass, 0)} of measurements (by design: this circuit only builds valid mixes)` : `${pct(q.feasible_mass, 0)} of measurements (blind guessing: ${pct(q.feasible_baskets / 2 ** q.qubits, 0)})`),
         h("dt", null, "Best mix"), h("dd", null, `${pct(q.p_best, 1)} chance per measurement (blind guessing: ${pct(q.p_best_blind, 1)})`),
         h("dt", null, "Your mix ranks"), h("dd", null, `#${q.rank} of ${q.feasible_baskets.toLocaleString("en-IN")} possible mixes`),
         h("dt", null, "Exact check"), h("dd", null, q.matches_exact ? "Matches the exact classical search." : `The exact search found a slightly better mix: ${q.exact_choice.map(short).join(", ")}.`),
         q.backend ? [h("dt", null, "Run on"), h("dd", null, q.backend + (q.job_id ? ` (job ${q.job_id})` : ""))] : null,
         h("dt", null, "Took"), h("dd", null, `${q.seconds} seconds`)) : null,
-      sampled ? h("p", { class: "muted", style: "margin-top:12px" }, "In plain words: at this size the circuit mostly learns which mixes are valid and leans toward good ones. The exact check is what confirms the winner. Quantum computers are not faster than normal computers for a problem this small, so this is a working demonstration of the method, not a speed claim.") : null,
+      sampled ? h("p", { class: "muted", style: "margin-top:12px" }, (q.mixer === "xy" ? "In plain words: the circuit only builds valid mixes and leans toward the better ones. Compare the best-mix chance above with blind guessing to see what the circuit adds. The exact check is what confirms the winner." : "In plain words: at this size the circuit mostly learns which mixes are valid and leans toward good ones. The exact check is what confirms the winner.") + " Quantum computers are not faster than normal computers for a problem this small, so this is a working demonstration of the method, not a speed claim.") : null,
       sampled && top.length ? h("div", null, h("h3", { style: "margin-top:16px" }, "Mixes the circuit produced most often"),
         top.map((s) => h("div", { class: "rowline" }, h("span", null, s.stocks.map(short).join(", ") + (s.feasible ? "" : " (not a valid mix)")), h("span", { class: "num" }, pct(s.prob, 1), " ", h("span", { class: "bar", style: `width:${Math.min(160, s.prob * 1600)}px` }))))) : null,
       q.note ? h("p", { class: "note warn" }, q.note) : null);

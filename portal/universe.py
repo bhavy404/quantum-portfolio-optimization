@@ -6,6 +6,7 @@ are downloaded the first time someone analyses it.
 Index membership changes over time, so treat the starter list as a starting point.
 """
 import csv
+from pathlib import Path
 import io
 import threading
 import urllib.request
@@ -71,14 +72,10 @@ def seed_core():
     )
 
 
-def refresh_from_nse(timeout: int = 20) -> int:
-    """Download NSE's official list of listed companies and add them to the search index."""
-    req = urllib.request.Request(
-        NSE_LIST_URL,
-        headers={"User-Agent": "Mozilla/5.0 (QPortal)", "Accept": "text/csv,*/*"},
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        text = resp.read().decode("utf-8", errors="replace")
+BUNDLED_LIST = Path(__file__).resolve().parent / "assets" / "EQUITY_L.csv"
+
+
+def _load_csv_text(text: str) -> int:
     rows = []
     for rec in csv.DictReader(io.StringIO(text)):
         rec = {k.strip(): (v or "").strip() for k, v in rec.items() if k}
@@ -93,13 +90,34 @@ def refresh_from_nse(timeout: int = 20) -> int:
     return len(rows)
 
 
+def load_bundled() -> int:
+    """Offline copy of NSE's list (shipped with the app) so search works without internet."""
+    return _load_csv_text(BUNDLED_LIST.read_text(encoding="utf-8", errors="replace")) if BUNDLED_LIST.exists() else 0
+
+
+def refresh_from_nse(timeout: int = 20) -> int:
+    """Download NSE's latest list of listed companies and add any new ones to the search index."""
+    req = urllib.request.Request(
+        NSE_LIST_URL,
+        headers={"User-Agent": "Mozilla/5.0 (QPortal)", "Accept": "text/csv,*/*"},
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        text = resp.read().decode("utf-8", errors="replace")
+    return _load_csv_text(text)
+
+
 def refresh_from_nse_async():
+    try:
+        print(f"[universe] bundled NSE list loaded: {load_bundled()} companies")
+    except Exception as exc:
+        print(f"[universe] bundled list failed ({exc})")
+
     def run():
         try:
             n = refresh_from_nse()
-            print(f"[universe] NSE list loaded: {n} companies")
+            print(f"[universe] NSE list refreshed online: {n} companies")
         except Exception as exc:  # network blocked, NSE changed format, etc.
-            print(f"[universe] NSE list not loaded ({exc}). Using the starter list only.")
+            print(f"[universe] online refresh skipped ({exc}); using the bundled list.")
 
     threading.Thread(target=run, daemon=True).start()
 

@@ -78,7 +78,8 @@
 
   function shell(content, active) {
     const nav = S.token ? h("nav", { class: "nav", "aria-label": "Main" },
-      h("a", { href: "#/", "aria-current": active === "flow" ? "page" : null }, "Pick stocks"),
+      h("a", { href: "#/", "aria-current": active === "dashboard" ? "page" : null }, "Dashboard"),
+      h("a", { href: "#/pick", "aria-current": active === "flow" ? "page" : null }, "Pick stocks"),
       h("a", { href: "#/history", "aria-current": active === "history" ? "page" : null }, "My results"),
       h("a", { href: "#/security", "aria-current": active === "security" ? "page" : null }, "Security")) : h("div", { class: "nav" });
     const who = S.token ? h("div", { class: "who" }, h("span", null, S.user && (S.user.name || S.user.email)),
@@ -105,13 +106,13 @@
       tabs.replaceChildren(
         h("button", { type: "button", role: "tab", "aria-selected": String(mode === "login"), onclick: () => { mode = "login"; draw(); } }, "Log in"),
         h("button", { type: "button", role: "tab", "aria-selected": String(mode === "register"), onclick: () => { mode = "register"; draw(); } }, "Create account"));
-      form.replaceChildren(
+      form.replaceChildren(...[
         mode === "register" ? h("label", { class: "field" }, h("span", null, "Your name"), h("input", { type: "text", name: "name", autocomplete: "name" })) : null,
         h("label", { class: "field" }, h("span", null, "Email"), h("input", { type: "email", name: "email", autocomplete: "email", required: true })),
         h("label", { class: "field" }, h("span", null, "Password"), h("input", { type: "password", name: "password", autocomplete: mode === "login" ? "current-password" : "new-password", required: true, minLength: 8 }),
           mode === "register" ? h("small", { class: "muted" }, "At least 8 characters.") : null),
         err,
-        h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account"));
+        h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account")].filter(Boolean));
       err.textContent = "";
     }
     form.addEventListener("submit", async (e) => {
@@ -304,9 +305,9 @@
   const qLabel = (q) => (q < 0.35 ? "Safety first" : q < 0.65 ? "Balanced" : "Growth first");
 
   async function viewComfort() {
-    if (S.shortlist.length < 3) { location.hash = "#/"; return; }
+    if (S.shortlist.length < 3) { location.hash = "#/pick"; return; }
     shell(h("p", { class: "boot" }, "Loading…"), "flow");
-    try { await loadRows(); } catch (ex) { location.hash = "#/"; return; }
+    try { await loadRows(); } catch (ex) { location.hash = "#/pick"; return; }
     const max = S.shortlist.length - 1;
     if (!S.k || S.k > max) S.k = Math.max(2, Math.min(max, Math.round(S.shortlist.length / 3)));
     const rows = S.shortlist.map(rowOf).filter(Boolean);
@@ -386,7 +387,7 @@
     const t0 = Date.now();
     const poll = async () => {
       let r;
-      try { r = await api("/api/runs/" + id); } catch (ex) { shell(h("div", { class: "panel" }, h("h2", null, "We could not open this result"), h("p", { class: "error" }, ex.message), h("a", { class: "btn", href: "#/" }, "Back to stocks")), "flow"); return; }
+      try { r = await api("/api/runs/" + id); } catch (ex) { shell(h("div", { class: "panel" }, h("h2", null, "We could not open this result"), h("p", { class: "error" }, ex.message), h("a", { class: "btn", href: "#/pick" }, "Back to stocks")), "flow"); return; }
       if (r.status === "running") {
         const s = Math.round((Date.now() - t0) / 1000);
         const p = document.querySelector(".waiting .muted"); if (p) p.textContent = `This usually takes under a minute. ${s}s so far.`;
@@ -453,7 +454,7 @@
       how(R),
       protect(R),
       h("p", { class: "disclaimer" }, `Equal amounts in each stock, rebalanced daily. Growth is the average yearly gain, ups and downs is yearly volatility. The Nifty 50 line uses the index, not an investable fund. Picks use the first 70% of days (to ${R.data.train_until}); the last 30% (from ${R.data.test_from}) are shown separately. Past results do not predict future results. This is an educational tool, not investment advice.`),
-      h("div", { class: "noprint" }, h("a", { class: "btn alt", href: "#/" }, "Change my shortlist"), " ", h("a", { class: "btn alt", href: "#/history" }, "My saved results"))), "flow");
+      h("div", { class: "noprint" }, h("a", { class: "btn alt", href: "#/pick" }, "Change my shortlist"), " ", h("a", { class: "btn alt", href: "#/history" }, "My saved results"))), "flow");
 
     // charts
     const splitIdx = c.dates.findIndex((d) => d >= c.split_date);
@@ -534,6 +535,67 @@
     const a = h("a", { href: URL.createObjectURL(blob), download: "qportal-mix.csv" }); document.body.append(a); a.click(); a.remove();
   }
 
+
+  // ---------- portfolio dashboard ----------
+  async function viewDashboard() {
+    shell(h("p", { class: "boot" }, "Loading your dashboard…"), "dashboard");
+    let rows = [], runs = [], health = S.health || {};
+    try { await loadRows(); rows = allRows().slice(); } catch (ex) { rows = []; }
+    try { runs = await api("/api/runs"); } catch (ex) { runs = []; }
+    const done = runs.filter(r => r.status === "done");
+    const avgReturn = rows.length ? rows.reduce((a,r)=>a+(r.annual_return||0),0)/rows.length : 0;
+    const avgVol = rows.length ? rows.reduce((a,r)=>a+(r.volatility||0),0)/rows.length : 0;
+    const gainers = rows.filter(r => (r.return_1y||0)>0).length;
+    const sorted = rows.slice().sort((a,b)=>(b.annual_return||0)-(a.annual_return||0));
+    const search = h("input", { type:"text", placeholder:"Search stocks or symbols…", "aria-label":"Search stocks" });
+    const sector = h("select", { "aria-label":"Filter by sector" }, h("option",{value:""},"All sectors"));
+    [...new Set(rows.map(r=>r.sector||"Other"))].sort().forEach(v=>sector.append(h("option",{value:v},v)));
+    const tableBody = h("tbody");
+    let sortKey = "annual_return", sortDir = -1;
+    function drawTable() {
+      const q=search.value.trim().toLowerCase(), sec=sector.value;
+      const filtered=rows.filter(r=>(!sec||r.sector===sec)&&(!q||(r.name+" "+r.symbol+" "+r.sector).toLowerCase().includes(q)))
+        .sort((a,b)=>((a[sortKey]??-Infinity)-(b[sortKey]??-Infinity))*sortDir);
+      tableBody.replaceChildren(...filtered.slice(0,12).map(r=>h("tr",null,
+        h("td",{"data-l":"Stock"},h("span",{class:"nm"},h("b",null,r.name),h("small",null,short(r.symbol)+" · "+r.sector))),
+        h("td",{"data-l":"Price"},inr(r.price)),
+        h("td",{"data-l":"1Y return",class:signClass(r.return_1y||0)},r.return_1y==null?"—":spct(r.return_1y,1)),
+        h("td",{"data-l":"Annual growth",class:signClass(r.annual_return||0)},spct(r.annual_return||0,1)),
+        h("td",{"data-l":"Volatility"},pct(r.volatility||0,1)),
+        h("td",{"data-l":"Risk"},h("span",{class:"tag "+(r.risk_level||"Medium")},r.risk_level||"Medium")),
+        h("td",{"data-l":"Action"},h("button",{class:"btn alt small",onclick:()=>{if(!S.shortlist.includes(r.symbol)){if(S.shortlist.length >= health.max_shortlist){alert(`Shortlist limit is ${health.max_shortlist}. Remove a stock on Pick stocks first.`);return;}S.shortlist.push(r.symbol);saveShort();}location.hash="#/pick";}},S.shortlist.includes(r.symbol)?"In shortlist":"Add +"))
+      )));
+      if(!filtered.length)tableBody.append(h("tr",null,h("td",{colSpan:7},"No stocks match these filters.")));
+    }
+    search.addEventListener("input",drawTable); sector.addEventListener("change",drawTable);
+    const table=h("table",{class:"stocks dashboard-stocks"},h("thead",null,h("tr",null,
+      ...[["Stock","name"],["Price","price"],["1Y return","return_1y"],["Annual growth","annual_return"],["Volatility","volatility"],["Risk","risk_level"]].map(([label,key])=>h("th",null,h("button",{type:"button",onclick:()=>{if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=-1;}drawTable();}},label+" ↕"))),h("th",null,"Action"))),tableBody);
+    drawTable();
+    const chartCanvas=h("canvas",{role:"img","aria-label":"Risk versus return chart for the available stock universe"});
+    const sectorCanvas=h("canvas",{role:"img","aria-label":"Average annual return by sector"});
+    const recent=h("div",{class:"recent-list"});
+    recent.replaceChildren(...(runs.length?runs.slice(0,4).map(r=>h("div",{class:"rowline"},h("div",null,h("b",null,r.title||("Analysis #"+r.id)),h("div",{class:"muted"},r.status+" · "+new Date(String(r.created).replace(" ","T")+"Z").toLocaleDateString("en-IN"))),h("a",{class:"btn alt small",href:"#/result/"+r.id},"Open result"))):[h("p",{class:"muted"},"No saved analyses yet. Run your first portfolio optimization to see results here.")]));
+    const sectorMap={}; rows.forEach(r=>{const k=r.sector||"Other";(sectorMap[k] ||= []).push(r.annual_return||0);});
+    const sectorLabels=Object.keys(sectorMap).sort();
+    shell(h("div",{class:"dashboard-page"},
+      h("div",{class:"dashboard-heading"},h("div",null,h("p",{class:"eyebrow"},"QUANTUM PORTFOLIO INTELLIGENCE"),h("h1",null,"Market overview"),h("p",{class:"muted"},"Your research cockpit for Indian equities, portfolio risk and quantum optimization.")),h("div",{class:"dashboard-actions"},h("span",{class:"live-pill"},h("i")," Market data "+(S.asOf?"updated":"cached")),h("button",{class:"btn alt",onclick:async()=>{S.rows=[];S.extra={};try{await loadRows();location.hash="#/";route();}catch(ex){alert(ex.message);}}},"↻ Refresh"),h("a",{class:"btn",href:"#/pick"},"Build portfolio →"))),
+      h("div",{class:"dashboard-kpis"},
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Stocks tracked"),h("span",{class:"kpi-icon"},"◉")),h("strong",null,rows.length.toLocaleString("en-IN")),h("small",null,"Across the core universe")),
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Average annual growth"),h("span",{class:"kpi-icon green"},"↗")),h("strong",{class:signClass(avgReturn)},spct(avgReturn,1)),h("small",null,"Historical mean of tracked stocks")),
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Average volatility"),h("span",{class:"kpi-icon amber"},"≈")),h("strong",null,pct(avgVol,1)),h("small",null,"Annualized historical variability")),
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Saved analyses"),h("span",{class:"kpi-icon purple"},"⌁")),h("strong",null,runs.length),h("small",null,done.length+" completed · encrypted results"))),
+      h("div",{class:"dashboard-grid"},
+        h("section",{class:"panel dash-panel dash-wide"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Risk vs. return"),h("p",{class:"muted"},"Compare historical annual growth with volatility. Each dot is a stock.")),h("span",{class:"mini-label"},"HISTORICAL")),h("div",{class:"chartbox dashboard-chart"},chartCanvas),h("div",{class:"chart-foot"},h("span",null,"● Growth per year vs. typical ups and downs"),h("span",null,"Past performance is not a forecast"))),
+        h("section",{class:"panel dash-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Sector snapshot"),h("p",{class:"muted"},"Average annual return by sector"))),h("div",{class:"chartbox dashboard-sector-chart"},sectorCanvas)),
+        h("section",{class:"panel dash-panel dash-wide"},h("div",{class:"panel-heading stock-heading"},h("div",null,h("h2",null,"Stock explorer"),h("p",{class:"muted"},"Search, sort and add a stock to your optimization shortlist.")),h("span",{class:"mini-label"},"TOP 12 MATCHES")),h("div",{class:"toolbar dashboard-toolbar"},h("label",{class:"field"},h("span",null,"Search"),search),h("label",{class:"field"},h("span",null,"Sector"),sector)),h("div",{class:"table-scroll"},table)),
+        h("section",{class:"panel dash-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Recent analyses"),h("p",{class:"muted"},"Jump back into saved portfolio results")),h("a",{href:"#/history"},"View all →")),recent),
+        h("section",{class:"panel dash-panel quick-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Quick actions"),h("p",{class:"muted"},"Continue where you left off"))),h("a",{class:"quick-action",href:"#/pick"},h("span",{class:"quick-icon"},"⌕"),h("span",null,h("b",null,"Explore stocks"),h("small",null,"Filter the universe and build a shortlist")),h("span",null,"→")),h("a",{class:"quick-action",href:"#/history"},h("span",{class:"quick-icon"},"▤"),h("span",null,h("b",null,"Saved results"),h("small",null,"Open or delete past analyses")),h("span",null,"→")),h("a",{class:"quick-action",href:"#/security"},h("span",{class:"quick-icon"},"◇"),h("span",null,h("b",null,"Security centre"),h("small",null,"Inspect key status and test tampering detection")),h("span",null,"→"))),
+      h("p",{class:"disclaimer"},"Data is historical and may be delayed. Statistics are calculated from the available price history and are not investment advice. Verify prices and suitability independently."))),"dashboard");
+    const pts=rows.map(r=>({x:(r.volatility||0)*100,y:(r.annual_return||0)*100,label:short(r.symbol)}));
+    charts.push(new Chart(chartCanvas,{type:"scatter",data:{datasets:[{label:"Stocks",data:pts,backgroundColor:"rgba(61,139,245,.72)",borderColor:"#3987E5",pointRadius:4,pointHoverRadius:7}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.raw.label}: growth ${c.raw.y.toFixed(1)}%, volatility ${c.raw.x.toFixed(1)}%`}}},scales:{x:{title:{display:true,text:"Annualized volatility (%)"},grid:{color:css("--line")}},y:{title:{display:true,text:"Annual growth (%)"},grid:{color:css("--line")}}}}}));
+    charts.push(new Chart(sectorCanvas,{type:"bar",data:{labels:sectorLabels,datasets:[{label:"Average annual return",data:sectorLabels.map(k=>sectorMap[k].reduce((a,b)=>a+b,0)/sectorMap[k].length*100),backgroundColor:sectorLabels.map(k=>(sectorMap[k].reduce((a,b)=>a+b,0)/sectorMap[k].length)>=0?"#3987E5":"#E66B66"),borderRadius:5}]},options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.raw.toFixed(1)+"%"}}},scales:{x:{ticks:{callback:v=>v+"%"},grid:{color:css("--line")}},y:{grid:{display:false},ticks:{autoSkip:false}}}}}));
+  }
+
   // ---------- history ----------
   async function viewHistory() {
     shell(h("p", { class: "boot" }, "Loading…"), "history");
@@ -544,7 +606,7 @@
       h("div", null, h("b", null, r.title), h("div", { class: "muted" }, new Date(r.created.replace(" ", "T") + "Z").toLocaleString("en-IN"), " · ", r.status === "done" ? "Saved, encrypted" : r.status === "running" ? "Still running" : "Failed")),
       h("div", null, h("a", { class: "btn small", href: "#/result/" + r.id }, "Open"), " ", h("button", { class: "btn danger small", onclick: async () => { await api("/api/runs/" + r.id, { method: "DELETE" }); runs = runs.filter((x) => x.id !== r.id); draw(); } }, "Delete")))) : [h("p", null, "Nothing saved yet. Your results appear here, encrypted, after each analysis.")]));
     draw();
-    shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "My results"), h("p", null, "Every analysis is stored encrypted with your own key.")), h("div", { class: "panel" }, list), h("a", { class: "btn", href: "#/" }, "Start a new analysis")), "history");
+    shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "My results"), h("p", null, "Every analysis is stored encrypted with your own key.")), h("div", { class: "panel" }, list), h("a", { class: "btn", href: "#/pick" }, "Start a new analysis")), "history");
   }
 
   // ---------- security ----------
@@ -584,10 +646,12 @@
     if (!S.token) { viewLogin(); return; }
     if (page === "login") { location.hash = "#/"; return; }
     if (page === "comfort") return viewComfort();
+    if (page === "pick") return viewChoose();
     if (page === "result") return viewResult(arg);
     if (page === "history") return viewHistory();
     if (page === "security") return viewSecurity();
-    return viewChoose();
+    if (page === "" || page == null) return viewDashboard();
+    return viewDashboard();
   }
   window.addEventListener("hashchange", route);
   route();

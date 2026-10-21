@@ -244,15 +244,12 @@ def _depth_unlocked(qp, params, reps, e_range, mixer="x", k=None):
 
 def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+    from qiskit_ibm_runtime import SamplerV2
 
-    if not config.IBM_TOKEN:
-        raise RuntimeError("IBM Quantum is not configured on this server.")
-    kwargs = {"channel": "ibm_quantum_platform", "token": config.IBM_TOKEN}
-    if config.IBM_INSTANCE:
-        kwargs["instance"] = config.IBM_INSTANCE
-    service = QiskitRuntimeService(**kwargs)
-    backend = service.backend(config.IBM_BACKEND)
+    from . import ibm
+
+    service = ibm.connect()
+    backend, backend_note = ibm.pick_backend(service, n)
     def build():
         circ = _qiskit_circuit(qp, params, reps, e_range, mixer, k)
         circ.measure_all()
@@ -261,7 +258,8 @@ def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
     isa = qlock.run(build)  # building and compiling happen on the Qiskit thread; waiting on IBM does not
     job = SamplerV2(mode=backend).run([isa], shots=shots)
     counts = job.result()[0].data.meas.get_counts()
-    return counts, backend.name, job.job_id(), int(isa.depth())
+    shown = backend.name + (f" ({backend_note})" if backend_note else "")
+    return counts, shown, job.job_id(), int(isa.depth())
 
 
 # ----- public entry point --------------------------------------------------------------------------

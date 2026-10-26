@@ -14,7 +14,9 @@ import urllib.request
 from . import db
 
 NSE_LIST_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
-BENCHMARK = "^NSEI"  # Nifty 50 index, used as the comparison line
+BENCHMARK = "^NSEI"  # NIFTY 50 index, used as the comparison line
+SENSEX = "^BSESN"  # BSE SENSEX index
+INDEXES = [(BENCHMARK, "NIFTY 50", "Market Index"), (SENSEX, "BSE SENSEX", "Market Index")]
 
 # (symbol without .NS, company name, sector)
 CORE = [
@@ -59,15 +61,17 @@ SECTOR_BY_SYMBOL = {f"{s}.NS": sec for s, _, sec in CORE}
 
 
 def _yahoo(sym: str) -> str:
-    return f"{sym}.NS"
+    # Index symbols are Yahoo Finance symbols already; equities use the NSE suffix.
+    return sym if sym.startswith("^") else f"{sym}.NS"
 
 
 def seed_core():
-    """Insert the curated starter list (idempotent)."""
+    """Insert the curated starter list and searchable market indices (idempotent)."""
     rows = [(_yahoo(s), n, sec, "core") for s, n, sec in CORE]
+    rows.extend((symbol, name, sector, "index") for symbol, name, sector in INDEXES)
     db.executemany(
         "INSERT INTO stocks(symbol,name,sector,tier) VALUES (?,?,?,?) "
-        "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name, sector=excluded.sector, tier='core'",
+        "ON CONFLICT(symbol) DO UPDATE SET name=excluded.name, sector=excluded.sector, tier=excluded.tier",
         rows,
     )
 
@@ -127,13 +131,18 @@ def search(q: str, limit: int = 20):
     return db.query(
         "SELECT symbol,name,sector,tier FROM stocks "
         "WHERE upper(symbol) LIKE ? OR upper(name) LIKE ? "
-        "ORDER BY CASE tier WHEN 'core' THEN 0 ELSE 1 END, symbol LIMIT ?",
+        "ORDER BY CASE tier WHEN 'core' THEN 0 WHEN 'index' THEN 1 ELSE 2 END, symbol LIMIT ?",
         (q, q, limit),
     )
 
 
 def core_symbols():
     return [r["symbol"] for r in db.query("SELECT symbol FROM stocks WHERE tier='core' ORDER BY symbol")]
+
+
+def index_symbols():
+    """Symbols for index series refreshed alongside the core equity universe."""
+    return [symbol for symbol, _, _ in INDEXES]
 
 
 def info(symbols):

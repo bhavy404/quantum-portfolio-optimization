@@ -84,12 +84,13 @@ def execute_hardware(circuits):
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
     from qiskit_ibm_runtime import SamplerV2
 
-    from . import ibm, qlock
+    from . import ibm, progress, qlock
 
+    progress.say("Making the BB84 key: connecting to IBM")
     service = ibm.connect()
     backend, backend_note = ibm.pick_backend(service, QUBITS)
     isa = qlock.run(lambda: generate_preset_pass_manager(optimization_level=1, backend=backend).run(circuits))
     job = SamplerV2(mode=backend).run([(c,) for c in isa], shots=1)  # one job; waiting happens off the Qiskit thread
-    result = job.result()
+    result = ibm.wait(job, "BB84 key on IBM")
     strings = [next(iter(r.data.meas.get_counts())) for r in result]
     return strings, job.job_id(), backend.name + (f" ({backend_note})" if backend_note else "")

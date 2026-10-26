@@ -193,6 +193,71 @@ dl.kv dt { color: var(--muted); } dl.kv dd { margin: 0; }
 .rowline { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--line); flex-wrap: wrap; }
 @media print { .topbar, .tray, .noprint { display: none !important; } body { background: #fff; } }
 
+/* ---- market landing page: indices are separate from selectable stocks ---- */
+.market-hero { padding: 12px 0 22px; }
+.market-hero .eyebrow, .index-eyebrow { color: var(--blue); font-size: .78rem; font-weight: 700; letter-spacing: .11em; margin: 0 0 8px; }
+.market-hero > p:last-child { color: var(--ink-2); font-size: 1.08rem; }
+.index-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 14px 0 24px; }
+.index-card { margin: 0; padding: 24px; }
+.index-card-top { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.index-card h2 { margin-bottom: 0; }
+.index-symbol { border: 1px solid var(--line); border-radius: 7px; padding: 4px 8px; color: var(--muted); font-size: .78rem; white-space: nowrap; }
+.index-value { font-size: clamp(2rem, 5vw, 3rem); font-weight: 700; letter-spacing: -.04em; margin: 22px 0 4px; }
+.index-change { font-size: 1rem; font-weight: 700; margin-bottom: 6px; }
+.index-foot { font-size: .85rem; margin-bottom: 0; }
+.market-actions { display: flex; justify-content: space-between; align-items: center; gap: 20px; }
+.market-actions h2 { margin-bottom: 6px; }
+.market-actions p { margin: 0; }
+.index-updated { font-size: .82rem; margin-top: 12px; }
+@media (max-width: 640px) { .index-grid { grid-template-columns: 1fr; } .market-actions { align-items: stretch; flex-direction: column; } .market-actions .btn { width: 100%; } }
+
+/* ---- fundamentals comparison ---- */
+.fundamentals-table { min-width: 900px; }
+.table-wrap { overflow-x: auto; width: 100%; }
+.fundamentals-table td, .fundamentals-table th { white-space: nowrap; }
+.fundamentals-table td.nm { white-space: normal; min-width: 170px; }
+
+/* ---- fundamental stock ranking ---- */
+.fundamental-weight-grid { display: grid; grid-template-columns: repeat(5, minmax(110px, 1fr)); gap: 12px; margin: 14px 0 18px; }
+.weight-field input { min-width: 0; }
+.weight-field input:disabled { opacity: .75; }
+.ranking-table { min-width: 760px; }
+.score-cell { font-weight: 800; }
+.category-scores { min-width: 220px; white-space: normal !important; }
+.score-tag { display: inline-block; margin: 2px 4px 2px 0; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; font-size: .76rem; white-space: nowrap; }
+@media (max-width: 760px) { .fundamental-weight-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ---- mutual fund explorer ---- */
+.mf-search-results { display: grid; gap: 6px; margin: 8px 0 14px; }
+.mf-result { display: flex; justify-content: space-between; align-items: center; gap: 12px; text-align: left; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); color: var(--ink); cursor: pointer; }
+.mf-result:hover:not(:disabled) { border-color: var(--blue); background: var(--blue-soft); }
+.mf-result:disabled { opacity: .5; cursor: not-allowed; }
+.mf-result span { font-weight: 600; }
+.mf-result small { color: var(--muted); white-space: nowrap; }
+.sip-inputs { display: grid; gap: 14px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin-bottom: 14px; }
+.sip-result { display: flex; gap: 28px; flex-wrap: wrap; margin-top: 16px; padding: 14px; border-radius: 10px; background: var(--blue-soft); }
+.sip-result div { display: grid; gap: 3px; }
+.sip-result span { color: var(--muted); font-size: .88rem; }
+.sip-result b { font-size: 1.25rem; }
+/* ---- multi-sector allocation builder ---- */
+.sector-choice-grid { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 16px 0; }
+.sector-choice { display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--line); border-radius: 12px; padding: 13px; cursor: pointer; }
+.sector-choice-title { display: flex; align-items: center; gap: 8px; }
+.sector-choice-title input { accent-color: var(--blue); width: 17px; height: 17px; }
+.sector-choice-title small { margin-left: auto; color: var(--muted); font-size: .75rem; text-align: right; }
+.sector-choice > span { color: var(--muted); font-size: .82rem; }
+.sector-choice input[type=number] { width: 100%; min-width: 0; }
+.sector-result-grid { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 18px 0 24px; }
+.sector-result-card { border: 1px solid var(--line); border-radius: 12px; padding: 16px; min-width: 0; }
+.sector-result-head { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.sector-result-head h3 { margin: 0; }
+.sector-result-head b { color: var(--blue); white-space: nowrap; }
+.sector-stock-list { font-size: .9rem; min-height: 42px; }
+.bar-track { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.bar-track .bar { display: block; height: 100%; border-radius: 999px; }
+@media (max-width: 900px) { .sector-choice-grid, .sector-result-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 640px) { .sip-inputs, .sector-choice-grid, .sector-result-grid { grid-template-columns: 1fr; } .mf-result { align-items: flex-start; flex-direction: column; gap: 4px; } }
+
 /* ---- portfolio intelligence dashboard ---- */
 .dashboard-page { padding-top: 8px; }
 .dashboard-heading { display:flex; justify-content:space-between; align-items:flex-end; gap:20px; margin-bottom:24px; }

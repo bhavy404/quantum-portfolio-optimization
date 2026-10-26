@@ -7,10 +7,11 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import analytics as an
-from . import db, keybank, prices, solver, universe
+from . import db, keybank, prices, progress, solver, universe
 from .universe import BENCHMARK
 
 _pool = ThreadPoolExecutor(max_workers=2)
+_key_pool = ThreadPoolExecutor(max_workers=2)
 
 RISK_LABELS = [(0.35, "Safety first"), (0.65, "Balanced"), (1.01, "Growth first")]
 
@@ -30,26 +31,40 @@ def _fail(run_id: int, message: str):
     db.execute("UPDATE runs SET status='failed', error=? WHERE id=?", (message, run_id))
 
 
-def _run(run_id: int, user_id: int, req: dict):
+def _make_key(run_id: int):
+    """Make the per-result BB84 key (one IBM job). Runs beside the QAOA step so the two IBM queue waits overlap."""
+    progress.begin(run_id)
     try:
+        progress.say("Making a fresh BB84 key on IBM")
+        return keybank.make_key_batched(), None
+    except Exception as exc:
+        traceback.print_exc()
+        return None, f"The IBM key step failed ({exc.__class__.__name__})."
+
+
+def _run(run_id: int, user_id: int, req: dict):
+    progress.begin(run_id)
+    key_future = _key_pool.submit(_make_key, run_id) if req.get("hw_key") else None  # starts waiting in IBM's queue now
+    try:
+        progress.say("Loading prices and measuring risk and return")
         result = compute(req)
         key_id, key_note = None, None
-        if req.get("hw_key"):  # a fresh BB84 key made on the IBM processor just for this result
-            try:
-                ks = keybank.make_key_batched()
-                if ks["status"] == "SECURE_KEY_ESTABLISHED":
-                    key_id = ks["key_id"]
-                else:
-                    key_note = ks["reason"]
-                    result["key_attempt"] = {k2: ks[k2] for k2 in ("backend", "qber", "qber_upper95", "secret_bits", "job_ids")}
-            except Exception as exc:
-                traceback.print_exc()
-                key_note = f"The IBM key step failed ({exc.__class__.__name__})."
+        if key_future is not None:
+            progress.say("Waiting for the BB84 key from IBM")
+            ks, err = key_future.result()
+            if err:
+                key_note = err
+            elif ks["status"] == "SECURE_KEY_ESTABLISHED":
+                key_id = ks["key_id"]
+            else:
+                key_note = ks["reason"]
+                result["key_attempt"] = {k2: ks[k2] for k2 in ("backend", "qber", "qber_upper95", "secret_bits", "job_ids")}
         if key_id is None:
             u = db.one("SELECT key_id FROM users WHERE id=?", (user_id,))
             key_id = u["key_id"] or keybank.assign_key(user_id)
         result["key"] = {**keybank.key_summary(key_id), "fresh_for_this_result": bool(req.get("hw_key")) and key_note is None,
                          "fallback_reason": key_note}
+        progress.say("Encrypting and saving the result")
         enc = keybank.encrypt(user_id, key_id, result)
         db.execute("UPDATE runs SET status='done', key_id=?, nonce_hex=?, ciphertext_hex=? WHERE id=?",
                    (key_id, enc["nonce_hex"], enc["ciphertext_hex"], run_id))
@@ -58,6 +73,8 @@ def _run(run_id: int, user_id: int, req: dict):
     except Exception as exc:
         traceback.print_exc()
         _fail(run_id, f"Something went wrong while analysing these stocks ({exc.__class__.__name__}). Try again or pick different stocks.")
+    finally:
+        progress.end(run_id)
 
 
 def compute(req: dict) -> dict:

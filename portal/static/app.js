@@ -44,6 +44,7 @@
   };
   let charts = [];
   let timer = null;
+  let marketTimer = null;
 
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json" };
@@ -78,15 +79,18 @@
 
   function shell(content, active) {
     const nav = S.token ? h("nav", { class: "nav", "aria-label": "Main" },
-      h("a", { href: "#/", "aria-current": active === "dashboard" ? "page" : null }, "Dashboard"),
-      h("a", { href: "#/pick", "aria-current": active === "flow" ? "page" : null }, "Pick stocks"),
+      h("a", { href: "#/home", "aria-current": active === "home" ? "page" : null }, "Market overview"),
+      h("a", { href: "#/choose", "aria-current": active === "flow" ? "page" : null }, "Choose stocks"),
+      h("a", { href: "#/fundamentals", "aria-current": active === "fundamentals" ? "page" : null }, "Fundamentals"),
+      h("a", { href: "#/mutual-funds", "aria-current": active === "mutual-funds" ? "page" : null }, "Mutual funds"),
+      h("a", { href: "#/sector-mix", "aria-current": active === "sector-mix" ? "page" : null }, "Sector mix"),
       h("a", { href: "#/history", "aria-current": active === "history" ? "page" : null }, "My results"),
       h("a", { href: "#/security", "aria-current": active === "security" ? "page" : null }, "Security")) : h("div", { class: "nav" });
     const who = S.token ? h("div", { class: "who" }, h("span", null, S.user && (S.user.name || S.user.email)),
       h("button", { class: "btn alt small", onclick: logout }, "Log out")) : null;
     $app.replaceChildren(...[
       S.health && S.health.synthetic ? h("div", { class: "banner", role: "alert" }, "TEST DATA – these prices are made up and only used for testing.") : null,
-      h("header", { class: "topbar" }, h("div", { class: "wrap" }, h("a", { class: "brand", href: "#/" }, h("i"), "QPortal"), nav, who)),
+      h("header", { class: "topbar" }, h("div", { class: "wrap" }, h("a", { class: "brand", href: "#/home" }, h("i"), "QPortal"), nav, who)),
       h("main", { class: "wrap", id: "main" }, content)].filter(Boolean));
     window.scrollTo(0, 0);
   }
@@ -122,7 +126,7 @@
       try {
         const out = await api("/api/auth/" + mode, { method: "POST", body: { email: fd.get("email"), password: fd.get("password"), name: fd.get("name") || "" } });
         S.token = out.token; S.user = out.user; store.set("qp_token", out.token); store.set("qp_user", out.user);
-        location.hash = "#/"; route();
+        location.hash = "#/home"; route();
       } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
     });
     draw();
@@ -135,6 +139,150 @@
           h("li", null, "A quantum-computing method picks the mix, and an exact check confirms it."),
           h("li", null, "Your saved results are encrypted with a key built from quantum circuits."))),
       h("div", { class: "panel" }, tabs, form)));
+  }
+
+  // ---------- market home: indices are shown before the stock picker ----------
+  async function viewHome() {
+    shell(h("p", { class: "boot" }, "Loading market indices…"), "home");
+    let data;
+    try { data = await api("/api/market-indices"); }
+    catch (ex) {
+      shell(h("div", { class: "pagehead" }, h("h1", null, "Market overview"), h("p", { class: "error" }, ex.message),
+        h("button", { class: "btn", onclick: () => { location.hash = "#/home"; route(); } }, "Try again")), "home");
+      return;
+    }
+    const fmt = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+    const fmtChange = (change, changePct) => change == null || changePct == null ? "Waiting for market data" : `${change >= 0 ? "+" : "−"}${Math.abs(change).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 })} points (${changePct >= 0 ? "+" : "−"}${Math.abs(changePct * 100).toFixed(2)}%)`;
+    const cards = (data.indices || []).map((item) => {
+      const up = item.change == null || item.change >= 0;
+      return h("article", { class: "index-card panel", "data-index-symbol": item.symbol },
+        h("div", { class: "index-card-top" }, h("div", null, h("p", { class: "index-eyebrow" }, "MARKET INDEX"), h("h2", null, item.name)),
+          h("span", { class: "index-symbol" }, item.symbol)),
+        h("p", { class: "index-value num" }, fmt(item.value)),
+        h("p", { class: "index-change " + (item.change == null ? "muted" : up ? "gain" : "loss") }, fmtChange(item.change, item.change_pct)),
+        h("p", { class: "index-foot muted" }, item.change_pct == null ? "Previous-session change unavailable" : `${item.change_pct >= 0 ? "+" : "−"}${Math.abs(item.change_pct * 100).toFixed(2)}% from previous close`));
+    });
+    shell(h("div", null,
+      h("section", { class: "market-hero" },
+        h("p", { class: "eyebrow" }, "INDIAN MARKETS · OVERVIEW"),
+        h("h1", null, "Your market snapshot"),
+        h("p", null, "Check the broad Indian market indices first. When you’re ready, continue to choose individual stocks for your portfolio.")),
+      h("section", { class: "index-grid", id: "market-index-grid", "aria-label": "Indian market indices" }, cards),
+      h("div", { class: "market-actions panel" },
+        h("div", null, h("h2", null, "Build your portfolio"), h("p", { class: "muted" }, "NIFTY 50 and SENSEX are market indices, shown separately from individual stocks.")),
+        h("button", { class: "btn", onclick: () => { location.hash = "#/choose"; } }, "Choose stocks →")),
+      h("p", { class: "disclaimer", id: "market-index-disclaimer" }, marketDisclaimer(data)),
+      h("p", { class: "index-updated muted", id: "market-index-updated" }, marketUpdatedText(data)),
+      h("div", { id: "stock-glance" })), "home");
+    try { const sec = await dashboardSection(); const slot = document.getElementById("stock-glance"); if (slot && !slot.hasChildNodes()) { slot.append(sec.node); sec.draw(); } } catch (ex) { /* index cards still work without this section */ }
+    if (marketTimer) clearInterval(marketTimer);
+    marketTimer = setInterval(refreshMarketCards, 30000);
+  }
+
+  async function dashboardSection() {
+    let rows = [], runs = [], health = S.health || {};
+    try { await loadRows(); rows = allRows().slice(); } catch (ex) { rows = []; }
+    try { runs = await api("/api/runs"); } catch (ex) { runs = []; }
+    const done = runs.filter(r => r.status === "done");
+    const avgReturn = rows.length ? rows.reduce((a,r)=>a+(r.annual_return||0),0)/rows.length : 0;
+    const avgVol = rows.length ? rows.reduce((a,r)=>a+(r.volatility||0),0)/rows.length : 0;
+    const gainers = rows.filter(r => (r.return_1y||0)>0).length;
+    const sorted = rows.slice().sort((a,b)=>(b.annual_return||0)-(a.annual_return||0));
+    const search = h("input", { type:"text", placeholder:"Search stocks or symbols…", "aria-label":"Search stocks" });
+    const sector = h("select", { "aria-label":"Filter by sector" }, h("option",{value:""},"All sectors"));
+    [...new Set(rows.map(r=>r.sector||"Other"))].sort().forEach(v=>sector.append(h("option",{value:v},v)));
+    const tableBody = h("tbody");
+    let sortKey = "annual_return", sortDir = -1;
+    function drawTable() {
+      const q=search.value.trim().toLowerCase(), sec=sector.value;
+      const filtered=rows.filter(r=>(!sec||r.sector===sec)&&(!q||(r.name+" "+r.symbol+" "+r.sector).toLowerCase().includes(q)))
+        .sort((a,b)=>((a[sortKey]??-Infinity)-(b[sortKey]??-Infinity))*sortDir);
+      tableBody.replaceChildren(...filtered.slice(0,12).map(r=>h("tr",null,
+        h("td",{"data-l":"Stock"},h("span",{class:"nm"},h("b",null,r.name),h("small",null,short(r.symbol)+" · "+r.sector))),
+        h("td",{"data-l":"Price"},inr(r.price)),
+        h("td",{"data-l":"1Y return",class:signClass(r.return_1y||0)},r.return_1y==null?"—":spct(r.return_1y,1)),
+        h("td",{"data-l":"Annual growth",class:signClass(r.annual_return||0)},spct(r.annual_return||0,1)),
+        h("td",{"data-l":"Volatility"},pct(r.volatility||0,1)),
+        h("td",{"data-l":"Risk"},h("span",{class:"tag "+(r.risk_level||"Medium")},r.risk_level||"Medium")),
+        h("td",{"data-l":"Action"},h("button",{class:"btn alt small",onclick:()=>{if(!S.shortlist.includes(r.symbol)){if(S.shortlist.length >= health.max_shortlist){alert(`Shortlist limit is ${health.max_shortlist}. Remove a stock on Pick stocks first.`);return;}S.shortlist.push(r.symbol);saveShort();}location.hash="#/choose";}},S.shortlist.includes(r.symbol)?"In shortlist":"Add +"))
+      )));
+      if(!filtered.length)tableBody.append(h("tr",null,h("td",{colSpan:7},"No stocks match these filters.")));
+    }
+    search.addEventListener("input",drawTable); sector.addEventListener("change",drawTable);
+    const table=h("table",{class:"stocks dashboard-stocks"},h("thead",null,h("tr",null,
+      ...[["Stock","name"],["Price","price"],["1Y return","return_1y"],["Annual growth","annual_return"],["Volatility","volatility"],["Risk","risk_level"]].map(([label,key])=>h("th",null,h("button",{type:"button",onclick:()=>{if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=-1;}drawTable();}},label+" ↕"))),h("th",null,"Action"))),tableBody);
+    drawTable();
+    const chartCanvas=h("canvas",{role:"img","aria-label":"Risk versus return chart for the available stock universe"});
+    const sectorCanvas=h("canvas",{role:"img","aria-label":"Average annual return by sector"});
+    const recent=h("div",{class:"recent-list"});
+    recent.replaceChildren(...(runs.length?runs.slice(0,4).map(r=>h("div",{class:"rowline"},h("div",null,h("b",null,r.title||("Analysis #"+r.id)),h("div",{class:"muted"},r.status+" · "+new Date(String(r.created).replace(" ","T")+"Z").toLocaleDateString("en-IN"))),h("a",{class:"btn alt small",href:"#/result/"+r.id},"Open result"))):[h("p",{class:"muted"},"No saved analyses yet. Run your first portfolio optimization to see results here.")]));
+    const sectorMap={}; rows.forEach(r=>{const k=r.sector||"Other";(sectorMap[k] ||= []).push(r.annual_return||0);});
+    const sectorLabels=Object.keys(sectorMap).sort();
+    const node=h("div",{class:"dashboard-page"},
+      h("div",{class:"dashboard-heading"},h("div",null,h("p",{class:"eyebrow"},"STOCKS AT A GLANCE"),h("h2",null,"Your stock universe"),h("p",{class:"muted"},"Growth, risk and sectors across the tracked Indian stocks.")),h("div",{class:"dashboard-actions"},h("a",{class:"btn alt",href:"#/history"},"My results"))),
+      h("div",{class:"dashboard-kpis"},
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Stocks tracked"),h("span",{class:"kpi-icon"},"◉")),h("strong",null,rows.length.toLocaleString("en-IN")),h("small",null,"Across the core universe")),
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Average annual growth"),h("span",{class:"kpi-icon green"},"↗")),h("strong",{class:signClass(avgReturn)},spct(avgReturn,1)),h("small",null,"Historical mean of tracked stocks")),
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Average volatility"),h("span",{class:"kpi-icon amber"},"≈")),h("strong",null,pct(avgVol,1)),h("small",null,"Annualized historical variability")),
+        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Saved analyses"),h("span",{class:"kpi-icon purple"},"⌁")),h("strong",null,runs.length),h("small",null,done.length+" completed · encrypted results"))),
+      h("div",{class:"dashboard-grid"},
+        h("section",{class:"panel dash-panel dash-wide"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Risk vs. return"),h("p",{class:"muted"},"Compare historical annual growth with volatility. Each dot is a stock.")),h("span",{class:"mini-label"},"HISTORICAL")),h("div",{class:"chartbox dashboard-chart"},chartCanvas),h("div",{class:"chart-foot"},h("span",null,"● Growth per year vs. typical ups and downs"),h("span",null,"Past performance is not a forecast"))),
+        h("section",{class:"panel dash-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Sector snapshot"),h("p",{class:"muted"},"Average annual return by sector"))),h("div",{class:"chartbox dashboard-sector-chart"},sectorCanvas)),
+        h("section",{class:"panel dash-panel dash-wide"},h("div",{class:"panel-heading stock-heading"},h("div",null,h("h2",null,"Stock explorer"),h("p",{class:"muted"},"Search, sort and add a stock to your optimization shortlist.")),h("span",{class:"mini-label"},"TOP 12 MATCHES")),h("div",{class:"toolbar dashboard-toolbar"},h("label",{class:"field"},h("span",null,"Search"),search),h("label",{class:"field"},h("span",null,"Sector"),sector)),h("div",{class:"table-scroll"},table)),
+        h("section",{class:"panel dash-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Recent analyses"),h("p",{class:"muted"},"Jump back into saved portfolio results")),h("a",{href:"#/history"},"View all →")),recent),
+        h("section",{class:"panel dash-panel quick-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Quick actions"),h("p",{class:"muted"},"Continue where you left off"))),h("a",{class:"quick-action",href:"#/choose"},h("span",{class:"quick-icon"},"⌕"),h("span",null,h("b",null,"Explore stocks"),h("small",null,"Filter the universe and build a shortlist")),h("span",null,"→")),h("a",{class:"quick-action",href:"#/history"},h("span",{class:"quick-icon"},"▤"),h("span",null,h("b",null,"Saved results"),h("small",null,"Open or delete past analyses")),h("span",null,"→")),h("a",{class:"quick-action",href:"#/security"},h("span",{class:"quick-icon"},"◇"),h("span",null,h("b",null,"Security centre"),h("small",null,"Inspect key status and test tampering detection")),h("span",null,"→"))),
+      h("p",{class:"disclaimer"},"Data is historical and may be delayed. Statistics are calculated from the available price history and are not investment advice. Verify prices and suitability independently.")));
+    const draw=()=>{
+    const pts=rows.map(r=>({x:(r.volatility||0)*100,y:(r.annual_return||0)*100,label:short(r.symbol)}));
+    charts.push(new Chart(chartCanvas,{type:"scatter",data:{datasets:[{label:"Stocks",data:pts,backgroundColor:"rgba(61,139,245,.72)",borderColor:"#3987E5",pointRadius:4,pointHoverRadius:7}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.raw.label}: growth ${c.raw.y.toFixed(1)}%, volatility ${c.raw.x.toFixed(1)}%`}}},scales:{x:{title:{display:true,text:"Annualized volatility (%)"},grid:{color:css("--line")}},y:{title:{display:true,text:"Annual growth (%)"},grid:{color:css("--line")}}}}}));
+    charts.push(new Chart(sectorCanvas,{type:"bar",data:{labels:sectorLabels,datasets:[{label:"Average annual return",data:sectorLabels.map(k=>sectorMap[k].reduce((a,b)=>a+b,0)/sectorMap[k].length*100),backgroundColor:sectorLabels.map(k=>(sectorMap[k].reduce((a,b)=>a+b,0)/sectorMap[k].length)>=0?"#3987E5":"#E66B66"),borderRadius:5}]},options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.raw.toFixed(1)+"%"}}},scales:{x:{ticks:{callback:v=>v+"%"},grid:{color:css("--line")}},y:{grid:{display:false},ticks:{autoSkip:false}}}}}));
+    };
+    return {node,draw};
+  }
+
+  function marketDisclaimer(data) {
+    const mode = data && data.mode;
+    if (mode === "intraday") return "Near-live 1-minute index data when available. Yahoo Finance may delay or omit quotes; this is not a guaranteed real-time feed. Cards refresh every 30 seconds while this page is open.";
+    if (mode === "mixed") return "Some index quotes are intraday and others use the latest daily close. Yahoo Finance may delay or omit quotes. Cards refresh every 30 seconds while this page is open.";
+    return "Showing the latest available daily close because intraday index quotes are unavailable. The app retries every 30 seconds; Yahoo Finance is not a guaranteed real-time feed.";
+  }
+
+  function marketUpdatedText(data) {
+    if (data && data.as_of) return "Latest quote timestamp: " + new Date(data.as_of).toLocaleString();
+    return "Market data timestamp unavailable.";
+  }
+
+  async function refreshMarketCards() {
+    if (!location.hash.startsWith("#/home") && location.hash !== "#/") return;
+    try {
+      const data = await api("/api/market-indices");
+      const grid = document.getElementById("market-index-grid");
+      if (!grid) return;
+      const fmt = (v) => v == null ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+      const fmtChange = (change, changePct) => change == null || changePct == null ? "Change unavailable (daily close / no intraday quote)" : `${change >= 0 ? "+" : "−"}${Math.abs(change).toLocaleString("en-IN", { maximumFractionDigits: 2, minimumFractionDigits: 2 })} points (${changePct >= 0 ? "+" : "−"}${Math.abs(changePct * 100).toFixed(2)}%)`;
+      for (const item of (data.indices || [])) {
+        const card = [...grid.querySelectorAll("[data-index-symbol]")].find((el) => el.getAttribute("data-index-symbol") === item.symbol);
+        if (!card) continue;
+        const value = card.querySelector(".index-value");
+        const change = card.querySelector(".index-change");
+        const foot = card.querySelector(".index-foot");
+        if (value) value.textContent = fmt(item.value);
+        if (change) {
+          change.textContent = fmtChange(item.change, item.change_pct);
+          change.className = "index-change " + (item.change == null ? "muted" : item.change >= 0 ? "gain" : "loss");
+        }
+        if (foot) foot.textContent = item.quote_type === "intraday" && item.quote_timestamp
+          ? "Intraday quote: " + new Date(item.quote_timestamp).toLocaleTimeString()
+          : "Latest daily close; intraday quote unavailable";
+      }
+      const updated = document.getElementById("market-index-updated");
+      if (updated) updated.textContent = marketUpdatedText(data);
+      const disclaimer = document.getElementById("market-index-disclaimer");
+      if (disclaimer) disclaimer.textContent = marketDisclaimer(data);
+    } catch (e) {
+      const updated = document.getElementById("market-index-updated");
+      if (updated) updated.textContent = "Could not refresh index quotes. Retrying in 30 seconds.";
+    }
   }
 
   // ---------- data ----------
@@ -305,9 +453,9 @@
   const qLabel = (q) => (q < 0.35 ? "Safety first" : q < 0.65 ? "Balanced" : "Growth first");
 
   async function viewComfort() {
-    if (S.shortlist.length < 3) { location.hash = "#/pick"; return; }
+    if (S.shortlist.length < 3) { location.hash = "#/"; return; }
     shell(h("p", { class: "boot" }, "Loading…"), "flow");
-    try { await loadRows(); } catch (ex) { location.hash = "#/pick"; return; }
+    try { await loadRows(); } catch (ex) { location.hash = "#/"; return; }
     const max = S.shortlist.length - 1;
     if (!S.k || S.k > max) S.k = Math.max(2, Math.min(max, Math.round(S.shortlist.length / 3)));
     const rows = S.shortlist.map(rowOf).filter(Boolean);
@@ -387,10 +535,10 @@
     const t0 = Date.now();
     const poll = async () => {
       let r;
-      try { r = await api("/api/runs/" + id); } catch (ex) { shell(h("div", { class: "panel" }, h("h2", null, "We could not open this result"), h("p", { class: "error" }, ex.message), h("a", { class: "btn", href: "#/pick" }, "Back to stocks")), "flow"); return; }
+      try { r = await api("/api/runs/" + id); } catch (ex) { shell(h("div", { class: "panel" }, h("h2", null, "We could not open this result"), h("p", { class: "error" }, ex.message), h("a", { class: "btn", href: "#/" }, "Back to stocks")), "flow"); return; }
       if (r.status === "running") {
         const s = Math.round((Date.now() - t0) / 1000);
-        const p = document.querySelector(".waiting .muted"); if (p) p.textContent = `This usually takes under a minute. ${s}s so far.`;
+        const p = document.querySelector(".waiting .muted"); if (p) p.textContent = (r.stage ? r.stage + ". " : "") + `${s}s so far. ` + (S.hwKey || S.engine === "qaoa_hw" ? "Real quantum computers have a queue, so this can take a few minutes. It stops waiting after 4 minutes and falls back to the simulator." : "This usually takes under a minute.");
         timer = setTimeout(poll, 1500); return;
       }
       if (r.status === "failed") { shell(h("div", { class: "panel" }, h("h2", null, "We could not finish this analysis"), h("p", { class: "error" }, r.error), h("a", { class: "btn", href: "#/comfort" }, "Change my choices")), "flow"); return; }
@@ -454,7 +602,7 @@
       how(R),
       protect(R),
       h("p", { class: "disclaimer" }, `Equal amounts in each stock, rebalanced daily. Growth is the average yearly gain, ups and downs is yearly volatility. The Nifty 50 line uses the index, not an investable fund. Picks use the first 70% of days (to ${R.data.train_until}); the last 30% (from ${R.data.test_from}) are shown separately. Past results do not predict future results. This is an educational tool, not investment advice.`),
-      h("div", { class: "noprint" }, h("a", { class: "btn alt", href: "#/pick" }, "Change my shortlist"), " ", h("a", { class: "btn alt", href: "#/history" }, "My saved results"))), "flow");
+      h("div", { class: "noprint" }, h("a", { class: "btn alt", href: "#/choose" }, "Change my shortlist"), " ", h("a", { class: "btn alt", href: "#/history" }, "My saved results"))), "flow");
 
     // charts
     const splitIdx = c.dates.findIndex((d) => d >= c.split_date);
@@ -535,65 +683,358 @@
     const a = h("a", { href: URL.createObjectURL(blob), download: "qportal-mix.csv" }); document.body.append(a); a.click(); a.remove();
   }
 
-
-  // ---------- portfolio dashboard ----------
-  async function viewDashboard() {
-    shell(h("p", { class: "boot" }, "Loading your dashboard…"), "dashboard");
-    let rows = [], runs = [], health = S.health || {};
-    try { await loadRows(); rows = allRows().slice(); } catch (ex) { rows = []; }
-    try { runs = await api("/api/runs"); } catch (ex) { runs = []; }
-    const done = runs.filter(r => r.status === "done");
-    const avgReturn = rows.length ? rows.reduce((a,r)=>a+(r.annual_return||0),0)/rows.length : 0;
-    const avgVol = rows.length ? rows.reduce((a,r)=>a+(r.volatility||0),0)/rows.length : 0;
-    const gainers = rows.filter(r => (r.return_1y||0)>0).length;
-    const sorted = rows.slice().sort((a,b)=>(b.annual_return||0)-(a.annual_return||0));
-    const search = h("input", { type:"text", placeholder:"Search stocks or symbols…", "aria-label":"Search stocks" });
-    const sector = h("select", { "aria-label":"Filter by sector" }, h("option",{value:""},"All sectors"));
-    [...new Set(rows.map(r=>r.sector||"Other"))].sort().forEach(v=>sector.append(h("option",{value:v},v)));
-    const tableBody = h("tbody");
-    let sortKey = "annual_return", sortDir = -1;
-    function drawTable() {
-      const q=search.value.trim().toLowerCase(), sec=sector.value;
-      const filtered=rows.filter(r=>(!sec||r.sector===sec)&&(!q||(r.name+" "+r.symbol+" "+r.sector).toLowerCase().includes(q)))
-        .sort((a,b)=>((a[sortKey]??-Infinity)-(b[sortKey]??-Infinity))*sortDir);
-      tableBody.replaceChildren(...filtered.slice(0,12).map(r=>h("tr",null,
-        h("td",{"data-l":"Stock"},h("span",{class:"nm"},h("b",null,r.name),h("small",null,short(r.symbol)+" · "+r.sector))),
-        h("td",{"data-l":"Price"},inr(r.price)),
-        h("td",{"data-l":"1Y return",class:signClass(r.return_1y||0)},r.return_1y==null?"—":spct(r.return_1y,1)),
-        h("td",{"data-l":"Annual growth",class:signClass(r.annual_return||0)},spct(r.annual_return||0,1)),
-        h("td",{"data-l":"Volatility"},pct(r.volatility||0,1)),
-        h("td",{"data-l":"Risk"},h("span",{class:"tag "+(r.risk_level||"Medium")},r.risk_level||"Medium")),
-        h("td",{"data-l":"Action"},h("button",{class:"btn alt small",onclick:()=>{if(!S.shortlist.includes(r.symbol)){if(S.shortlist.length >= health.max_shortlist){alert(`Shortlist limit is ${health.max_shortlist}. Remove a stock on Pick stocks first.`);return;}S.shortlist.push(r.symbol);saveShort();}location.hash="#/pick";}},S.shortlist.includes(r.symbol)?"In shortlist":"Add +"))
-      )));
-      if(!filtered.length)tableBody.append(h("tr",null,h("td",{colSpan:7},"No stocks match these filters.")));
+  // ---------- mutual funds: search, compare NAV history, and estimate SIP value ----------
+  async function viewMutualFunds() {
+    let selected = [];
+    let searchTimer = null;
+    let catalogRows = [];
+    const searchInput = h("input", { type: "search", placeholder: "Filter by fund or scheme name (e.g. HDFC Flexi Cap)", "aria-label": "Search mutual funds in supplied dataset" });
+    const categoryFilter = h("select", { "aria-label": "Filter mutual-fund category" }, h("option", { value: "" }, "All categories"));
+    const amcFilter = h("select", { "aria-label": "Filter mutual-fund fund house" }, h("option", { value: "" }, "All fund houses"));
+    const typeFilter = h("select", { "aria-label": "Filter mutual-fund scheme type" }, h("option", { value: "" }, "All scheme types"));
+    const schemeSelect = h("select", { "aria-label": "Select a mutual-fund scheme" }, h("option", { value: "" }, "Loading dataset…"));
+    const catalogStatus = h("p", { class: "muted" }, "Loading the supplied mutual-fund dataset…");
+    const resultsBox = h("div", { class: "mf-search-results" });
+    const chips = h("div", { class: "chips" });
+    const tableWrap = h("div", { class: "table-wrap" });
+    const status = h("p", { class: "muted" }, "Select up to five schemes to compare.");
+    const searchError = h("p", { class: "error" });
+    const fmt = (v, digits = 2) => v == null || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-IN", { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    const fmtReturn = (v) => v == null ? "—" : (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(2) + "%";
+    function drawChips() {
+      chips.replaceChildren(...selected.map((x) => h("span", { class: "chip" }, x.scheme_name,
+        h("button", { type: "button", "aria-label": "Remove " + x.scheme_name, onclick: () => { selected = selected.filter((f) => f.scheme_code !== x.scheme_code); drawChips(); updateSchemeOptions(); } }, "×"))));
     }
-    search.addEventListener("input",drawTable); sector.addEventListener("change",drawTable);
-    const table=h("table",{class:"stocks dashboard-stocks"},h("thead",null,h("tr",null,
-      ...[["Stock","name"],["Price","price"],["1Y return","return_1y"],["Annual growth","annual_return"],["Volatility","volatility"],["Risk","risk_level"]].map(([label,key])=>h("th",null,h("button",{type:"button",onclick:()=>{if(sortKey===key)sortDir*=-1;else{sortKey=key;sortDir=-1;}drawTable();}},label+" ↕"))),h("th",null,"Action"))),tableBody);
-    drawTable();
-    const chartCanvas=h("canvas",{role:"img","aria-label":"Risk versus return chart for the available stock universe"});
-    const sectorCanvas=h("canvas",{role:"img","aria-label":"Average annual return by sector"});
-    const recent=h("div",{class:"recent-list"});
-    recent.replaceChildren(...(runs.length?runs.slice(0,4).map(r=>h("div",{class:"rowline"},h("div",null,h("b",null,r.title||("Analysis #"+r.id)),h("div",{class:"muted"},r.status+" · "+new Date(String(r.created).replace(" ","T")+"Z").toLocaleDateString("en-IN"))),h("a",{class:"btn alt small",href:"#/result/"+r.id},"Open result"))):[h("p",{class:"muted"},"No saved analyses yet. Run your first portfolio optimization to see results here.")]));
-    const sectorMap={}; rows.forEach(r=>{const k=r.sector||"Other";(sectorMap[k] ||= []).push(r.annual_return||0);});
-    const sectorLabels=Object.keys(sectorMap).sort();
-    shell(h("div",{class:"dashboard-page"},
-      h("div",{class:"dashboard-heading"},h("div",null,h("p",{class:"eyebrow"},"QUANTUM PORTFOLIO INTELLIGENCE"),h("h1",null,"Market overview"),h("p",{class:"muted"},"Your research cockpit for Indian equities, portfolio risk and quantum optimization.")),h("div",{class:"dashboard-actions"},h("span",{class:"live-pill"},h("i")," Market data "+(S.asOf?"updated":"cached")),h("button",{class:"btn alt",onclick:async()=>{S.rows=[];S.extra={};try{await loadRows();location.hash="#/";route();}catch(ex){alert(ex.message);}}},"↻ Refresh"),h("a",{class:"btn",href:"#/pick"},"Build portfolio →"))),
-      h("div",{class:"dashboard-kpis"},
-        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Stocks tracked"),h("span",{class:"kpi-icon"},"◉")),h("strong",null,rows.length.toLocaleString("en-IN")),h("small",null,"Across the core universe")),
-        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Average annual growth"),h("span",{class:"kpi-icon green"},"↗")),h("strong",{class:signClass(avgReturn)},spct(avgReturn,1)),h("small",null,"Historical mean of tracked stocks")),
-        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Average volatility"),h("span",{class:"kpi-icon amber"},"≈")),h("strong",null,pct(avgVol,1)),h("small",null,"Annualized historical variability")),
-        h("article",{class:"kpi-card"},h("div",{class:"kpi-top"},h("span",null,"Saved analyses"),h("span",{class:"kpi-icon purple"},"⌁")),h("strong",null,runs.length),h("small",null,done.length+" completed · encrypted results"))),
-      h("div",{class:"dashboard-grid"},
-        h("section",{class:"panel dash-panel dash-wide"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Risk vs. return"),h("p",{class:"muted"},"Compare historical annual growth with volatility. Each dot is a stock.")),h("span",{class:"mini-label"},"HISTORICAL")),h("div",{class:"chartbox dashboard-chart"},chartCanvas),h("div",{class:"chart-foot"},h("span",null,"● Growth per year vs. typical ups and downs"),h("span",null,"Past performance is not a forecast"))),
-        h("section",{class:"panel dash-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Sector snapshot"),h("p",{class:"muted"},"Average annual return by sector"))),h("div",{class:"chartbox dashboard-sector-chart"},sectorCanvas)),
-        h("section",{class:"panel dash-panel dash-wide"},h("div",{class:"panel-heading stock-heading"},h("div",null,h("h2",null,"Stock explorer"),h("p",{class:"muted"},"Search, sort and add a stock to your optimization shortlist.")),h("span",{class:"mini-label"},"TOP 12 MATCHES")),h("div",{class:"toolbar dashboard-toolbar"},h("label",{class:"field"},h("span",null,"Search"),search),h("label",{class:"field"},h("span",null,"Sector"),sector)),h("div",{class:"table-scroll"},table)),
-        h("section",{class:"panel dash-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Recent analyses"),h("p",{class:"muted"},"Jump back into saved portfolio results")),h("a",{href:"#/history"},"View all →")),recent),
-        h("section",{class:"panel dash-panel quick-panel"},h("div",{class:"panel-heading"},h("div",null,h("h2",null,"Quick actions"),h("p",{class:"muted"},"Continue where you left off"))),h("a",{class:"quick-action",href:"#/pick"},h("span",{class:"quick-icon"},"⌕"),h("span",null,h("b",null,"Explore stocks"),h("small",null,"Filter the universe and build a shortlist")),h("span",null,"→")),h("a",{class:"quick-action",href:"#/history"},h("span",{class:"quick-icon"},"▤"),h("span",null,h("b",null,"Saved results"),h("small",null,"Open or delete past analyses")),h("span",null,"→")),h("a",{class:"quick-action",href:"#/security"},h("span",{class:"quick-icon"},"◇"),h("span",null,h("b",null,"Security centre"),h("small",null,"Inspect key status and test tampering detection")),h("span",null,"→"))),
-      h("p",{class:"disclaimer"},"Data is historical and may be delayed. Statistics are calculated from the available price history and are not investment advice. Verify prices and suitability independently."))),"dashboard");
-    const pts=rows.map(r=>({x:(r.volatility||0)*100,y:(r.annual_return||0)*100,label:short(r.symbol)}));
-    charts.push(new Chart(chartCanvas,{type:"scatter",data:{datasets:[{label:"Stocks",data:pts,backgroundColor:"rgba(61,139,245,.72)",borderColor:"#3987E5",pointRadius:4,pointHoverRadius:7}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>`${c.raw.label}: growth ${c.raw.y.toFixed(1)}%, volatility ${c.raw.x.toFixed(1)}%`}}},scales:{x:{title:{display:true,text:"Annualized volatility (%)"},grid:{color:css("--line")}},y:{title:{display:true,text:"Annual growth (%)"},grid:{color:css("--line")}}}}}));
-    charts.push(new Chart(sectorCanvas,{type:"bar",data:{labels:sectorLabels,datasets:[{label:"Average annual return",data:sectorLabels.map(k=>sectorMap[k].reduce((a,b)=>a+b,0)/sectorMap[k].length*100),backgroundColor:sectorLabels.map(k=>(sectorMap[k].reduce((a,b)=>a+b,0)/sectorMap[k].length)>=0?"#3987E5":"#E66B66"),borderRadius:5}]},options:{indexAxis:"y",responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:c=>c.raw.toFixed(1)+"%"}}},scales:{x:{ticks:{callback:v=>v+"%"},grid:{color:css("--line")}},y:{grid:{display:false},ticks:{autoSkip:false}}}}}));
+    function updateSchemeOptions() {
+      const current = schemeSelect.value;
+      const options = catalogRows.map((fund) => {
+        const nav = fund.latest_nav == null ? "NAV unavailable in snapshot" : "NAV ₹" + fmt(fund.latest_nav, 4);
+        const label = `${fund.display_name || fund.scheme_name} · ${fund.scheme_category || fund.scheme_type || "Unclassified"} · ${nav}`;
+        return h("option", { value: String(fund.scheme_code), disabled: selected.some((x) => x.scheme_code === fund.scheme_code) }, label);
+      });
+      schemeSelect.replaceChildren(h("option", { value: "" }, catalogRows.length ? "Choose a mutual-fund scheme…" : "No schemes match these filters"), ...options);
+      if (catalogRows.some((r) => String(r.scheme_code) === current && !selected.some((x) => String(x.scheme_code) === current))) schemeSelect.value = current;
+    }
+    let filtersLoaded = false;
+    async function loadCatalog() {
+      catalogStatus.textContent = "Filtering the supplied dataset…";
+      searchError.textContent = "";
+      const params = new URLSearchParams({
+        q: searchInput.value.trim(),
+        category: categoryFilter.value,
+        amc: amcFilter.value,
+        scheme_type: typeFilter.value,
+        limit: "500"
+      });
+      try {
+        const data = await api("/api/mutual-fund-catalog?" + params.toString());
+        if (!filtersLoaded) {
+          categoryFilter.replaceChildren(h("option", { value: "" }, "All categories"), ...(data.categories || []).map((x) => h("option", { value: x }, x)));
+          amcFilter.replaceChildren(h("option", { value: "" }, "All fund houses"), ...(data.amcs || []).map((x) => h("option", { value: x }, x)));
+          typeFilter.replaceChildren(h("option", { value: "" }, "All scheme types"), ...(data.scheme_types || []).map((x) => h("option", { value: x }, x)));
+          filtersLoaded = true;
+        }
+        catalogRows = data.results || [];
+        updateSchemeOptions();
+        catalogStatus.textContent = `${data.total.toLocaleString("en-IN")} schemes match these filters; showing up to ${catalogRows.length}. Dataset NAV snapshot: ${data.nav_snapshot_date || "date unavailable"}.`;
+      } catch (ex) {
+        catalogRows = [];
+        updateSchemeOptions();
+        catalogStatus.textContent = "Could not load the supplied mutual-fund dataset.";
+        searchError.textContent = ex.message;
+      }
+    }
+    searchInput.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadCatalog, 250); });
+    categoryFilter.addEventListener("change", loadCatalog);
+    amcFilter.addEventListener("change", loadCatalog);
+    typeFilter.addEventListener("change", loadCatalog);
+    const addSchemeBtn = h("button", { class: "btn", onclick: () => {
+      const fund = catalogRows.find((x) => String(x.scheme_code) === schemeSelect.value);
+      if (!fund) { catalogStatus.textContent = "Choose a scheme from the dropdown first."; return; }
+      if (selected.length >= 5) { catalogStatus.textContent = "You can compare up to five schemes at a time."; return; }
+      if (!selected.some((x) => x.scheme_code === fund.scheme_code)) {
+        selected.push({ scheme_code: fund.scheme_code, scheme_name: fund.display_name || fund.scheme_name });
+        drawChips(); updateSchemeOptions();
+      }
+    } }, "Add selected scheme");
+    const compareBtn = h("button", { class: "btn alt", onclick: loadComparison }, "Load / refresh comparison");
+    async function loadComparison() {
+      if (!selected.length) { status.textContent = "Select at least one fund from the dropdown first."; return; }
+      compareBtn.disabled = true; compareBtn.textContent = "Loading NAV history…";
+      status.textContent = "Fetching NAV history and calculating trailing returns. This may take a moment.";
+      try {
+        const details = await Promise.all(selected.map((fund) => api("/api/mutual-funds/" + fund.scheme_code).catch((e) => ({ scheme_code: fund.scheme_code, scheme_name: fund.scheme_name, error: e.message }))));
+        const table = h("table", { class: "stocks fundamentals-table" },
+          h("thead", null, h("tr", null, ...["Fund / scheme", "Latest NAV", "NAV date", "1-year return", "3-year CAGR", "5-year CAGR", "Category"].map((x) => h("th", null, x)))),
+          h("tbody", null, ...details.map((fund) => h("tr", null,
+            h("td", { class: "nm", "data-l": "Fund / scheme" }, h("b", null, fund.scheme_name || "Fund"), h("small", null, fund.fund_house || (fund.error ? fund.error : "Scheme " + fund.scheme_code))),
+            h("td", { class: "num", "data-l": "Latest NAV" }, fund.latest_nav == null ? "—" : "₹" + fmt(fund.latest_nav, 4)),
+            h("td", { class: "num", "data-l": "NAV date" }, fund.nav_date || "—"),
+            h("td", { class: "num " + signClass(fund.returns?.["1y"] || 0), "data-l": "1-year return" }, fmtReturn(fund.returns?.["1y"])),
+            h("td", { class: "num " + signClass(fund.returns?.["3y_cagr"] || 0), "data-l": "3-year CAGR" }, fmtReturn(fund.returns?.["3y_cagr"])),
+            h("td", { class: "num " + signClass(fund.returns?.["5y_cagr"] || 0), "data-l": "5-year CAGR" }, fmtReturn(fund.returns?.["5y_cagr"])),
+            h("td", { "data-l": "Category" }, fund.scheme_category || fund.scheme_type || "—")))));
+        tableWrap.replaceChildren(table);
+        status.textContent = "Returns are calculated from reported NAV history, before tax and investor-specific costs. Historical returns do not predict future performance.";
+      } catch (ex) { status.textContent = ex.message; }
+      finally { compareBtn.disabled = false; compareBtn.textContent = "Load / refresh comparison"; }
+    }
+    const monthly = h("input", { type: "number", min: 500, step: 500, value: 5000, "aria-label": "Monthly SIP amount" });
+    const years = h("input", { type: "number", min: 1, max: 40, value: 10, "aria-label": "SIP duration in years" });
+    const rate = h("input", { type: "number", min: 0, max: 30, step: 0.5, value: 12, "aria-label": "Assumed annual return percentage" });
+    const sipResult = h("div", { class: "sip-result muted" }, "Enter your assumptions and calculate an illustrative SIP value.");
+    const sipBtn = h("button", { class: "btn alt", onclick: () => {
+      const p = Math.max(0, Number(monthly.value) || 0), n = Math.min(40, Math.max(1, Number(years.value) || 1)) * 12, r = Math.max(0, Number(rate.value) || 0) / 1200;
+      const invested = p * n; const future = r ? p * ((Math.pow(1 + r, n) - 1) / r) * (1 + r) : invested;
+      sipResult.className = "sip-result"; sipResult.replaceChildren(h("div", null, h("span", null, "Invested"), h("b", null, inr(invested))), h("div", null, h("span", null, "Illustrative value"), h("b", null, inr(future))), h("div", null, h("span", null, "Illustrative gain"), h("b", null, inr(future - invested))));
+    } }, "Calculate SIP estimate");
+    shell(h("div", null,
+      h("section", { class: "pagehead" }, h("p", { class: "eyebrow" }, "INVESTMENT RESEARCH"), h("h1", null, "Mutual fund explorer"), h("p", null, "Browse your supplied dataset using category, fund-house, and scheme-type dropdowns. Compare historical NAV-based returns and estimate a monthly SIP.")),
+      h("section", { class: "panel" }, h("h2", null, "1. Browse and select funds"), h("label", { class: "field" }, h("span", null, "Search dataset"), searchInput),
+        h("div", { class: "sip-inputs" }, h("label", { class: "field" }, h("span", null, "Category"), categoryFilter), h("label", { class: "field" }, h("span", null, "Fund house / AMC"), amcFilter), h("label", { class: "field" }, h("span", null, "Scheme type"), typeFilter)),
+        h("label", { class: "field" }, h("span", null, "Select scheme"), schemeSelect), addSchemeBtn, catalogStatus, searchError,
+        h("p", { class: "muted" }, "Selected funds (up to 5)"), chips, compareBtn, status, tableWrap),
+      h("section", { class: "panel" }, h("h2", null, "2. SIP calculator"), h("p", { class: "muted" }, "This is a mathematical illustration, not a return forecast or recommendation."),
+        h("div", { class: "sip-inputs" }, h("label", { class: "field" }, h("span", null, "Monthly investment (₹)"), monthly), h("label", { class: "field" }, h("span", null, "Years"), years), h("label", { class: "field" }, h("span", null, "Assumed annual return (%)"), rate)), sipBtn, sipResult),
+      h("p", { class: "disclaimer" }, "Dataset fields include scheme, AMC, category, NAV snapshot, minimum amount and AUM. NAV snapshot dates may be older than today's NAV; comparison fetches historical NAV from MFAPI / reported AMFI data when available. Expense ratios, exit loads, taxes and direct-vs-regular plan costs are not included. Verify scheme documents before investing.")), "mutual-funds");
+    loadCatalog();
+  }
+
+  // ---------- sector mix builder ----------
+  async function viewSectorMix() {
+    shell(h("div", { class: "waiting" }, h("div", { class: "spinner" }), h("p", null, "Loading sector performance…")), "sector-mix");
+    let data;
+    try { data = await api("/api/sector-recommendations"); }
+    catch (ex) { shell(h("section", { class: "panel" }, h("h1", null, "Sector mix builder"), h("p", { class: "error" }, ex.message)), "sector-mix"); return; }
+    const amount = h("input", { type: "number", min: 1000, step: 1000, value: 100000, "aria-label": "Portfolio amount in rupees" });
+    const selected = new Set();
+    const sectorsWrap = h("div", { class: "sector-choice-grid" });
+    const result = h("div", { class: "sector-results" });
+    const note = h("p", { class: "muted" }, "The website calculates suggested weights from historical sector-stock performance. You can choose which sectors to include; weights are recalculated automatically.");
+    const fmtGrowth = (v) => v == null || !Number.isFinite(Number(v)) ? "Not enough data" : (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
+    const formatSuggested = (v) => (v * 100).toFixed(1) + "%";
+    const byName = new Map((data.sectors || []).map((x) => [x.name, x]));
+    const rankedSectors = [...(data.sectors || [])].sort((a, b) => (b.momentum ?? -Infinity) - (a.momentum ?? -Infinity));
+    // Start with up to five sectors with the strongest available observed momentum.
+    rankedSectors.slice(0, Math.min(5, rankedSectors.length)).forEach((x) => selected.add(x.name));
+    function allocation() {
+      const chosen = [...selected].map((name) => byName.get(name)).filter(Boolean);
+      const totalScore = chosen.reduce((sum, x) => sum + (Number(x.score) || 0), 0);
+      return chosen.map((sector) => ({ ...sector, weight: totalScore ? sector.score / totalScore : 1 / Math.max(1, chosen.length) }));
+    }
+    function build() {
+      const chosen = allocation();
+      if (chosen.length < 2) { note.textContent = "Choose at least two sectors. QPortal will suggest their relative weights automatically."; result.replaceChildren(); return; }
+      const invested = Math.max(0, Number(amount.value) || 0);
+      const rows = [];
+      const sectorCards = chosen.map((sector) => {
+        const sectorMoney = invested * sector.weight;
+        const stocks = (sector.stocks || []).slice(0, 4);
+        const perStock = stocks.length ? sectorMoney / stocks.length : 0;
+        stocks.forEach((stock) => rows.push({ ...stock, sector: sector.name, weight: sector.weight / Math.max(1, stocks.length), amount: perStock }));
+        return h("article", { class: "sector-result-card" },
+          h("div", { class: "sector-result-head" }, h("h3", null, sector.name), h("b", null, formatSuggested(sector.weight))),
+          h("p", { class: "muted" }, inr(sectorMoney) + " suggested allocation"),
+          h("p", { class: "muted" }, "3-month growth: " + fmtGrowth(sector.return_3m) + " · 1-year growth: " + fmtGrowth(sector.return_1y)),
+          h("p", { class: "sector-stock-list" }, stocks.map((x) => x.name).join(" · ") || "No starter stocks available"),
+          h("div", { class: "bar-track" }, h("span", { class: "bar", style: "width:" + (sector.weight * 100) + "%" })));
+      });
+      const table = h("table", { class: "stocks" }, h("thead", null, h("tr", null, ...["Sector", "Example stock", "Portfolio weight", "Illustrative allocation"].map((x) => h("th", null, x)))),
+        h("tbody", null, ...rows.map((r) => h("tr", null, h("td", { "data-l": "Sector" }, r.sector), h("td", { "data-l": "Example stock" }, h("b", null, r.name), h("small", null, r.symbol.replace(".NS", ""))), h("td", { class: "num", "data-l": "Portfolio weight" }, (r.weight * 100).toFixed(2) + "%"), h("td", { class: "num", "data-l": "Illustrative allocation" }, inr(r.amount))))));
+      result.replaceChildren(
+        h("div", { class: "tiles" }, h("div", { class: "tile" }, h("b", null, inr(invested)), h("span", null, "Portfolio amount")), h("div", { class: "tile" }, h("b", null, chosen.length), h("span", null, "Sectors included")), h("div", { class: "tile" }, h("b", null, rows.length), h("span", null, "Example stocks")),
+        h("div", { class: "tile" }, h("b", null, data.synthetic ? "Synthetic" : "Historical"), h("span", null, "Price data mode"))),
+        h("div", { class: "sector-result-grid" }, sectorCards), h("h2", null, "Illustrative stock allocation"), table);
+      note.textContent = "Suggested weights are normalized to 100% among selected sectors. They use 35% 3-month and 65% 1-year average price performance; up to four starter stocks per sector are shown with equal weights within that sector. This is a historical-momentum heuristic, not a forecast or optimized portfolio.";
+    }
+    for (const sector of data.sectors || []) {
+      const checked = h("input", { type: "checkbox", checked: selected.has(sector.name), "aria-label": "Include " + sector.name, onchange: (event) => {
+        if (event.target.checked) selected.add(sector.name); else selected.delete(sector.name);
+        build();
+      } });
+      const suggested = sector.suggested_weight == null ? "—" : formatSuggested(sector.suggested_weight);
+      sectorsWrap.append(h("label", { class: "sector-choice" },
+        h("div", { class: "sector-choice-title" }, checked, h("b", null, sector.name), h("small", null, (sector.stock_count || 0) + " starter stocks")),
+        h("span", null, "Historical growth · 3M: " + fmtGrowth(sector.return_3m) + " · 1Y: " + fmtGrowth(sector.return_1y)),
+        h("span", null, "Suggested weight across all sectors: " + suggested)));
+    }
+    const buildBtn = h("button", { class: "btn", onclick: build }, "Refresh suggested combination");
+    amount.addEventListener("input", build);
+    shell(h("div", null,
+      h("section", { class: "pagehead" }, h("p", { class: "eyebrow" }, "DIVERSIFICATION WORKSPACE"), h("h1", null, "Auto-weighted sector portfolio"), h("p", null, "QPortal suggests sector weights from available historical stock-price growth. Select or deselect sectors; the site automatically redistributes weights across your chosen combination.")),
+      h("section", { class: "panel" }, h("h2", null, "1. Set portfolio size"), h("label", { class: "field" }, h("span", null, "Portfolio amount (₹)"), amount),
+        h("h2", null, "2. Choose sectors (weights are automatic)"), sectorsWrap, buildBtn, note),
+      h("section", { class: "panel" }, h("h2", null, "3. Suggested sector combination"), result),
+      h("p", { class: "disclaimer" }, (data.method || "") + " " + (data.note || "")),), "sector-mix");
+    build();
+  }
+
+  // ---------- fundamentals and fundamental stock ranker ----------
+  async function viewFundamentals() {
+    let selected = [];
+    let rows = [];
+    let searchTimer = null;
+    let ranked = [];
+    const status = h("p", { class: "muted" }, "Search for companies, add up to eight, then load their reported fundamentals.");
+    const searchInput = h("input", { type: "search", placeholder: "Search company or NSE symbol (e.g. TCS, Infosys)", "aria-label": "Search companies" });
+    const resultsBox = h("div");
+    const chips = h("div", { class: "chips" });
+    const tableWrap = h("div", { class: "table-wrap" });
+    const rankWrap = h("div", { class: "table-wrap" });
+    const profileDefinitions = {
+      balanced: { label: "Balanced fundamentals", weights: { profitability: 30, growth: 25, valuation: 20, financial_health: 15, dividends: 10 } },
+      quality: { label: "Quality & financial strength", weights: { profitability: 40, growth: 15, valuation: 10, financial_health: 25, dividends: 10 } },
+      growth: { label: "Growth stocks", weights: { profitability: 25, growth: 40, valuation: 15, financial_health: 15, dividends: 5 } },
+      value: { label: "Value stocks", weights: { profitability: 20, growth: 15, valuation: 40, financial_health: 20, dividends: 5 } },
+      dividend: { label: "Dividend stocks", weights: { profitability: 20, growth: 10, valuation: 10, financial_health: 20, dividends: 40 } },
+      custom: { label: "Custom weights", weights: { profitability: 30, growth: 25, valuation: 20, financial_health: 15, dividends: 10 } },
+    };
+    const categories = [
+      ["profitability", "Profitability"], ["growth", "Growth"], ["valuation", "Valuation"],
+      ["financial_health", "Financial health"], ["dividends", "Dividends"]
+    ];
+    const metricLabels = { pe_ratio: "P/E ratio", eps: "EPS", pb_ratio: "P/B ratio", roe: "ROE", roce: "ROCE", debt_to_equity: "Debt-to-equity", revenue_growth: "Revenue growth", net_profit_margin: "Net profit margin", dividend_yield: "Dividend yield", market_cap: "Market capitalization" };
+    const scoringMetrics = [
+      { key: "roe", category: "profitability", higher: true },
+      { key: "roce", category: "profitability", higher: true },
+      { key: "net_profit_margin", category: "profitability", higher: true },
+      { key: "revenue_growth", category: "growth", higher: true },
+      { key: "pe_ratio", category: "valuation", higher: false },
+      { key: "pb_ratio", category: "valuation", higher: false },
+      { key: "debt_to_equity", category: "financial_health", higher: false },
+      { key: "dividend_yield", category: "dividends", higher: true },
+    ];
+    const profile = h("select", { "aria-label": "Scoring strategy" }, ...Object.entries(profileDefinitions).map(([v, p]) => h("option", { value: v }, p.label)));
+    const weightInputs = {};
+    const weightGrid = h("div", { class: "fundamental-weight-grid" });
+    const metricFilter = h("select", { "aria-label": "Filter by metric" },
+      h("option", { value: "all" }, "All metrics"),
+      ...Object.entries(metricLabels).map(([v, l]) => h("option", { value: v }, l)));
+    const sectorFilter = h("select", { "aria-label": "Filter by sector" }, h("option", { value: "" }, "All sectors"));
+    const formatMetric = (key, value, currency) => {
+      if (value == null || !Number.isFinite(Number(value))) return "—";
+      value = Number(value);
+      if (["roe", "roce", "revenue_growth", "net_profit_margin", "dividend_yield"].includes(key)) return (value * 100).toFixed(2) + "%";
+      if (key === "market_cap") return (currency === "INR" ? "₹" : currency + " ") + new Intl.NumberFormat("en-IN", { notation: "compact", maximumFractionDigits: 2 }).format(value);
+      if (key === "eps") return (currency === "INR" ? "₹" : currency + " ") + value.toFixed(2);
+      return value.toFixed(2) + (key === "debt_to_equity" ? "%" : "");
+    };
+    function currentWeights() {
+      const out = {};
+      for (const [key] of categories) out[key] = Math.max(0, Number(weightInputs[key].value) || 0);
+      const sum = Object.values(out).reduce((a, b) => a + b, 0);
+      if (!sum) return out;
+      for (const key of Object.keys(out)) out[key] = out[key] / sum * 100;
+      return out;
+    }
+    function drawTable() {
+      const sector = sectorFilter.value; const metric = metricFilter.value;
+      const filtered = rows.filter((r) => !sector || r.sector === sector);
+      const metrics = Object.keys(metricLabels).filter((k) => metric === "all" || metric === k);
+      const table = h("table", { class: "stocks fundamentals-table" },
+        h("thead", null, h("tr", null, h("th", null, "Company"), ...metrics.map((k) => h("th", null, metricLabels[k])))),
+        h("tbody", null, ...filtered.map((r) => h("tr", null,
+          h("td", { class: "nm", "data-l": "Company" }, h("b", null, r.name), h("small", null, `${short(r.symbol)} · ${r.sector}`)),
+          ...metrics.map((k) => h("td", { class: "num", "data-l": metricLabels[k] }, formatMetric(k, r.values[k], r.currency)))))));
+      tableWrap.replaceChildren(table);
+      if (!filtered.length) tableWrap.replaceChildren(h("p", { class: "muted" }, "Add companies and load their fundamentals to compare them here."));
+    }
+    function drawChips() {
+      chips.replaceChildren(...selected.map((x) => h("span", { class: "chip" }, `${x.name} (${short(x.symbol)})`,
+        h("button", { type: "button", "aria-label": "Remove " + x.name, onclick: () => { selected = selected.filter((s) => s.symbol !== x.symbol); drawChips(); } }, "×"))));
+    }
+    function rankRows() {
+      if (!rows.length) { rankWrap.replaceChildren(h("p", { class: "muted" }, "Load company fundamentals to generate a ranking.")); return; }
+      const weights = currentWeights();
+      // Convert each metric into a percentile within the currently selected peer group.
+      const percentiles = {};
+      for (const metric of scoringMetrics) {
+        const valid = rows.filter((r) => r.available && Number.isFinite(Number(r.values[metric.key])) && r.values[metric.key] != null);
+        percentiles[metric.key] = new Map();
+        for (const row of valid) {
+          const value = Number(row.values[metric.key]);
+          const below = valid.filter((x) => (metric.higher ? Number(x.values[metric.key]) < value : Number(x.values[metric.key]) > value)).length;
+          const equal = valid.filter((x) => Number(x.values[metric.key]) === value).length;
+          const p = valid.length <= 1 ? 50 : ((below + (equal - 1) / 2) / (valid.length - 1)) * 100;
+          percentiles[metric.key].set(row.symbol, p);
+        }
+      }
+      ranked = rows.map((row) => {
+        let total = 0; let used = 0; const breakdown = {};
+        for (const [category] of categories) {
+          const members = scoringMetrics.filter((m) => m.category === category && percentiles[m.key].has(row.symbol));
+          if (!members.length || weights[category] <= 0) { breakdown[category] = null; continue; }
+          const catScore = members.reduce((sum, m) => sum + percentiles[m.key].get(row.symbol), 0) / members.length;
+          breakdown[category] = catScore;
+          total += catScore * weights[category]; used += weights[category];
+        }
+        return { ...row, score: used ? total / used : null, breakdown, coverage: scoringMetrics.filter((m) => percentiles[m.key].has(row.symbol)).length };
+      }).sort((a, b) => (b.score ?? -1) - (a.score ?? -1));
+      const fmtScore = (v) => v == null ? "Insufficient data" : v.toFixed(1) + "/100";
+      const table = h("table", { class: "stocks fundamentals-table ranking-table" },
+        h("thead", null, h("tr", null, h("th", null, "Rank"), h("th", null, "Company"), h("th", null, "Score"), h("th", null, "Metrics available"), h("th", null, "Category scores"))),
+        h("tbody", null, ...ranked.map((r, i) => h("tr", null,
+          h("td", { class: "num" }, r.score == null ? "—" : "#" + (i + 1)),
+          h("td", { class: "nm" }, h("b", null, r.name), h("small", null, `${short(r.symbol)} · ${r.sector}`)),
+          h("td", { class: "num score-cell" }, fmtScore(r.score)),
+          h("td", { class: "num" }, `${r.coverage}/${scoringMetrics.length}`),
+          h("td", { class: "category-scores" }, categories.map(([key, label]) => r.breakdown[key] == null ? null : h("span", { class: "score-tag" }, `${label}: ${r.breakdown[key].toFixed(0)}`)))))));
+      rankWrap.replaceChildren(table);
+      const available = ranked.filter((r) => r.score != null).length;
+      rankingStatus.textContent = `${available} of ${ranked.length} companies ranked. Scores are relative to the selected companies, not absolute quality ratings. EPS and market capitalization are shown in the comparison table but excluded from the score because raw EPS and company size are not directly comparable across businesses.`;
+    }
+    function setProfileWeights() {
+      const p = profileDefinitions[profile.value];
+      for (const [key] of categories) weightInputs[key].value = p.weights[key];
+      const custom = profile.value === "custom";
+      for (const [key] of categories) weightInputs[key].disabled = !custom;
+      rankRows();
+    }
+    const rankingStatus = h("p", { class: "muted" }, "Load company fundamentals to generate a ranking.");
+    for (const [key, label] of categories) {
+      const input = h("input", { type: "number", min: 0, max: 100, step: 5, value: profileDefinitions.balanced.weights[key], "aria-label": label + " weight" });
+      input.addEventListener("input", () => { profile.value = "custom"; for (const [k] of categories) weightInputs[k].disabled = false; rankRows(); });
+      weightInputs[key] = input;
+      weightGrid.append(h("label", { class: "field weight-field" }, h("span", null, label + " (%)"), input));
+    }
+    profile.addEventListener("change", setProfileWeights);
+    searchInput.addEventListener("input", () => {
+      clearTimeout(searchTimer); const q = searchInput.value.trim();
+      if (q.length < 2) { resultsBox.replaceChildren(); return; }
+      searchTimer = setTimeout(async () => {
+        try {
+          const found = await api("/api/stocks/search?q=" + encodeURIComponent(q));
+          resultsBox.replaceChildren(...found.filter((x) => !x.symbol.startsWith("^") && !selected.some((s) => s.symbol === x.symbol)).slice(0, 8).map((x) =>
+            h("div", { class: "rowline" }, h("span", null, `${x.name} (${short(x.symbol)}) · ${x.sector}`),
+              h("button", { class: "btn small", disabled: selected.length >= 8, onclick: () => { if (selected.length < 8) selected.push(x); drawChips(); resultsBox.replaceChildren(); searchInput.value = ""; } }, "Add"))));
+          if (!resultsBox.childNodes.length) resultsBox.replaceChildren(h("p", { class: "muted" }, "No matching companies available."));
+        } catch (ex) { resultsBox.replaceChildren(h("p", { class: "error" }, ex.message)); }
+      }, 300);
+    });
+    const load = h("button", { class: "btn", onclick: async () => {
+      if (!selected.length) { status.textContent = "Add at least one company first."; return; }
+      load.disabled = true; load.textContent = "Loading fundamentals…"; status.textContent = "Fetching reported company metrics. This can take a few seconds.";
+      try {
+        const data = await api("/api/fundamentals?symbols=" + encodeURIComponent(selected.map((x) => x.symbol).join(",")));
+        rows = data.items || [];
+        const sectors = [...new Set(rows.map((r) => r.sector).filter(Boolean))].sort();
+        sectorFilter.replaceChildren(h("option", { value: "" }, "All sectors"), ...sectors.map((x) => h("option", { value: x }, x)));
+        const missing = rows.filter((r) => !r.available).length;
+        status.textContent = `${rows.length} companies loaded. Values are provider-reported; ${missing} company/companies have no available fundamentals. Cached for up to 6 hours.`;
+        drawTable(); rankRows();
+      } catch (ex) { status.textContent = ex.message; }
+      finally { load.disabled = false; load.textContent = "Load / refresh comparison"; }
+    } }, "Load / refresh comparison");
+    sectorFilter.addEventListener("change", drawTable); metricFilter.addEventListener("change", drawTable);
+    setProfileWeights();
+    shell(h("div", null,
+      h("div", { class: "pagehead" }, h("h1", null, "Fundamental analysis & stock ranker"), h("p", null, "Compare ten reported fundamentals and rank your selected companies using five investment profiles.")),
+      h("section", { class: "panel" }, h("label", { class: "field" }, h("span", null, "Find companies"), searchInput), resultsBox,
+        h("h3", null, "Selected companies"), chips, h("p", { class: "muted" }, "Select between 1 and 8 companies. Indices are excluded because they are not individual companies."), load, status),
+      h("section", { class: "panel" }, h("h2", null, "Fundamental stock ranking"), h("p", { class: "muted" }, "Choose a strategy. Custom weights are normalized automatically to total 100% when scoring."),
+        h("label", { class: "field" }, h("span", null, "Scoring profile"), profile), weightGrid, rankingStatus, rankWrap),
+      h("section", { class: "panel" }, h("div", { class: "toolbar" }, h("label", { class: "field" }, h("span", null, "Filter sector"), sectorFilter), h("label", { class: "field" }, h("span", null, "Show metric"), metricFilter)), tableWrap),
+      h("p", { class: "disclaimer" }, "Scoring uses relative percentiles among the companies you selected. Higher ROE, ROCE, margin, revenue growth and dividend yield score better; lower P/E, P/B and debt-to-equity score better. EPS and market capitalization are displayed but not scored. Scores are screening aids, not guarantees or investment advice.")), "fundamentals");
   }
 
   // ---------- history ----------
@@ -606,7 +1047,7 @@
       h("div", null, h("b", null, r.title), h("div", { class: "muted" }, new Date(r.created.replace(" ", "T") + "Z").toLocaleString("en-IN"), " · ", r.status === "done" ? "Saved, encrypted" : r.status === "running" ? "Still running" : "Failed")),
       h("div", null, h("a", { class: "btn small", href: "#/result/" + r.id }, "Open"), " ", h("button", { class: "btn danger small", onclick: async () => { await api("/api/runs/" + r.id, { method: "DELETE" }); runs = runs.filter((x) => x.id !== r.id); draw(); } }, "Delete")))) : [h("p", null, "Nothing saved yet. Your results appear here, encrypted, after each analysis.")]));
     draw();
-    shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "My results"), h("p", null, "Every analysis is stored encrypted with your own key.")), h("div", { class: "panel" }, list), h("a", { class: "btn", href: "#/pick" }, "Start a new analysis")), "history");
+    shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "My results"), h("p", null, "Every analysis is stored encrypted with your own key.")), h("div", { class: "panel" }, list), h("a", { class: "btn", href: "#/" }, "Start a new analysis")), "history");
   }
 
   // ---------- security ----------
@@ -640,18 +1081,23 @@
 
   // ---------- router ----------
   async function route() {
-    killCharts(); setupChartDefaults();
+    killCharts();
+    if (marketTimer) { clearInterval(marketTimer); marketTimer = null; }
+    setupChartDefaults();
     if (!S.health) { try { S.health = await (await fetch("/api/health")).json(); } catch (e) { S.health = { synthetic: false, max_shortlist: 12, min_shortlist: 3 }; } }
     const [, page, arg] = (location.hash || "#/").split("/");
     if (!S.token) { viewLogin(); return; }
-    if (page === "login") { location.hash = "#/"; return; }
+    if (page === "login") { location.hash = "#/home"; return; }
+    if (page === "home" || !page) return viewHome();
+    if (page === "choose") return viewChoose();
+    if (page === "fundamentals") return viewFundamentals();
+    if (page === "mutual-funds") return viewMutualFunds();
+    if (page === "sector-mix") return viewSectorMix();
     if (page === "comfort") return viewComfort();
-    if (page === "pick") return viewChoose();
     if (page === "result") return viewResult(arg);
     if (page === "history") return viewHistory();
     if (page === "security") return viewSecurity();
-    if (page === "" || page == null) return viewDashboard();
-    return viewDashboard();
+    return viewChoose();
   }
   window.addEventListener("hashchange", route);
   route();

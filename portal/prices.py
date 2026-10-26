@@ -15,6 +15,12 @@ from .universe import BENCHMARK, SECTOR_BY_SYMBOL
 
 MIN_DAYS = 200  # about 10 months of trading days needed to analyse a stock
 
+# Intraday index quotes are deliberately kept separate from the daily-history cache.
+# Yahoo Finance's unofficial intraday feed can be delayed or unavailable, so callers
+# must show the quote timestamp and use a daily-close fallback when needed.
+_INTRADAY_INDEX_CACHE = {"fetched_at": None, "data": None}
+_INTRADAY_CACHE_SECONDS = 25
+
 
 class DataUnavailable(Exception):
     pass
@@ -62,6 +68,55 @@ def _download(symbols):
                 if len(ser) >= MIN_DAYS:
                     out[s] = ser
     return out
+
+
+
+def intraday_index_quotes(symbols):
+    """Fetch near-live 1-minute index bars, cached briefly to avoid repeated Yahoo calls.
+
+    Returns a dict keyed by ticker with {value, timestamp}. This is not an exchange-
+    licensed real-time feed; Yahoo data may be delayed, missing, or rate limited.
+    """
+    global _INTRADAY_INDEX_CACHE
+    symbols = list(dict.fromkeys(symbols))
+    now = _now()
+    cached_at = _INTRADAY_INDEX_CACHE.get("fetched_at")
+    cached_data = _INTRADAY_INDEX_CACHE.get("data")
+    if cached_at and cached_data is not None and (now - cached_at).total_seconds() < _INTRADAY_CACHE_SECONDS:
+        return {s: cached_data[s] for s in symbols if s in cached_data}
+
+    if SYNTHETIC:
+        _INTRADAY_INDEX_CACHE = {"fetched_at": now, "data": {}}
+        return {}
+
+    result = {}
+    try:
+        import yfinance as yf
+        raw = yf.download(symbols, period="1d", interval="1m", auto_adjust=False,
+                          progress=False, threads=False, prepost=False)
+        if raw is not None and not raw.empty:
+            close = raw["Close"] if isinstance(raw.columns, pd.MultiIndex) else raw[["Close"]].rename(columns={"Close": symbols[0]})
+            for symbol in symbols:
+                if symbol not in close.columns:
+                    continue
+                series = close[symbol].dropna()
+                if series.empty:
+                    continue
+                stamp = series.index[-1]
+                if hasattr(stamp, "to_pydatetime"):
+                    stamp = stamp.to_pydatetime()
+                if getattr(stamp, "tzinfo", None) is not None:
+                    stamp = stamp.astimezone(timezone.utc)
+                else:
+                    # Yahoo intraday indexes are normally exchange-local; label unknown
+                    # timezone data explicitly as UTC rather than implying live freshness.
+                    stamp = stamp.replace(tzinfo=timezone.utc)
+                result[symbol] = {"value": float(series.iloc[-1]), "timestamp": stamp.isoformat()}
+    except Exception as exc:
+        print(f"[prices] intraday index fetch failed: {exc}")
+
+    _INTRADAY_INDEX_CACHE = {"fetched_at": now, "data": result}
+    return result
 
 
 def refresh(symbols, force=False):

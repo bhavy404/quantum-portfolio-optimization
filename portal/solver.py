@@ -24,7 +24,7 @@ import time
 
 import numpy as np
 
-from . import config, qlock
+from . import config, progress, qlock
 
 SHOTS = 2048
 RESTARTS = 6
@@ -244,15 +244,12 @@ def _depth_unlocked(qp, params, reps, e_range, mixer="x", k=None):
 
 def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
     from qiskit.transpiler.preset_passmanagers import generate_preset_pass_manager
-    from qiskit_ibm_runtime import QiskitRuntimeService, SamplerV2
+    from qiskit_ibm_runtime import SamplerV2
 
-    if not config.IBM_TOKEN:
-        raise RuntimeError("IBM Quantum is not configured on this server.")
-    kwargs = {"channel": "ibm_quantum_platform", "token": config.IBM_TOKEN}
-    if config.IBM_INSTANCE:
-        kwargs["instance"] = config.IBM_INSTANCE
-    service = QiskitRuntimeService(**kwargs)
-    backend = service.backend(config.IBM_BACKEND)
+    from . import ibm
+
+    service = ibm.connect()
+    backend, backend_note = ibm.pick_backend(service, n)
     def build():
         circ = _qiskit_circuit(qp, params, reps, e_range, mixer, k)
         circ.measure_all()
@@ -260,8 +257,10 @@ def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
 
     isa = qlock.run(build)  # building and compiling happen on the Qiskit thread; waiting on IBM does not
     job = SamplerV2(mode=backend).run([isa], shots=shots)
-    counts = job.result()[0].data.meas.get_counts()
-    return counts, backend.name, job.job_id(), int(isa.depth())
+    progress.say(f"Sent the circuit to {backend.name}")
+    counts = ibm.wait(job, "QAOA on IBM")[0].data.meas.get_counts()
+    shown = backend.name + (f" ({backend_note})" if backend_note else "")
+    return counts, shown, job.job_id(), int(isa.depth())
 
 
 # ----- public entry point --------------------------------------------------------------------------
@@ -292,14 +291,24 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
     else:
         e_range = float(E.max() - E.min()) or 1.0
         e_norm = (E - E.min()) / e_range
+    progress.say(f"Training the quantum circuit on a simulator ({n} qubits)")
     params, _ = _train(e_norm, n, reps, maxiter, mixer=mixer, k=k)
     probs = np.abs(_state(params, e_norm, n, reps, mixer, k)) ** 2
     qp = _qubo_program(mu_s, sig_s, k, q, penalty)
     out["circuit_depth"], out["cx_gates"] = _depth(qp, params, reps, e_range, mixer, k)
     out["shots"] = SHOTS
 
+    hw_fail = None
     if engine == "qaoa_hw":
-        counts, name, job_id, hw_depth = _run_hardware(qp, params, reps, e_range, n, mixer=mixer, k=k)
+        try:
+            progress.say("Connecting to IBM Quantum")
+            counts, name, job_id, hw_depth = _run_hardware(qp, params, reps, e_range, n, mixer=mixer, k=k)
+        except Exception as ex:
+            hw_fail = f"IBM hardware could not finish this run ({ex}); the simulator result is shown instead."
+            print("[ibm]", hw_fail)
+            engine = "qaoa_sim"
+            out["engine"] = "qaoa_sim"
+    if engine == "qaoa_hw":
         total = sum(counts.values())
         measured = {}
         for bits, c in counts.items():
@@ -336,5 +345,7 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
     else:
         out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True)
         out["note"] = "The circuit produced no valid basket this time, so the exact answer is shown."
+    if hw_fail:
+        out["note"] = hw_fail + (" " + out["note"] if out["note"] else "")
     out["seconds"] = round(time.time() - t0, 2)
     return out

@@ -25,9 +25,11 @@ KEY_TARGET = os.getenv("QPORTAL_KEY_TARGET", "simulator").lower()
 IBM_TOKEN = os.getenv("IBM_QUANTUM_TOKEN", "").strip()
 IBM_BACKEND = os.getenv("IBM_BACKEND_NAME", "ibm_fez").strip() or "ibm_fez"
 IBM_INSTANCE = os.getenv("IBM_QUANTUM_INSTANCE", "").strip()
+# How long to wait for one IBM job (queue + run) before giving up and using the simulator instead.
+IBM_WAIT_SECONDS = int(os.getenv("IBM_WAIT_SECONDS", "240"))
 
 HISTORY_YEARS = int(os.getenv("QPORTAL_HISTORY_YEARS", "3"))
-PRICE_MAX_AGE_HOURS = int(os.getenv("QPORTAL_PRICE_MAX_AGE_HOURS", "20"))
+PRICE_MAX_AGE_HOURS = int(os.getenv("QPORTAL_PRICE_MAX_AGE_HOURS", "4"))
 MAX_SHORTLIST = 12   # statevector QAOA stays interactive up to ~12 qubits
 MIN_SHORTLIST = 3
 BANK_TARGET_KEYS = int(os.getenv("QPORTAL_BANK_KEYS", "3"))

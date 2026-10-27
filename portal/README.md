@@ -17,13 +17,15 @@ The first start downloads about three years of daily prices for the starter list
 loads NSE's list of listed companies for search. Prices come from yfinance (an unofficial source: fine for a
 project; use a licensed data feed before running a public service).
 
+> Want the IBM quantum features? Follow [docs/IBM_SETUP.md](../docs/IBM_SETUP.md).
+
 ## Settings (environment variables or `.env`)
 
 | Name | Meaning | Default |
 |---|---|---|
 | `QPORTAL_SECRET` | Secret for login tokens and key hardening. **Set this in production.** | auto-generated file in `portal/data/` |
 | `QPORTAL_KEY_TARGET` | Where BB84 circuits run: `simulator` or `hardware` | `simulator` |
-| `IBM_QUANTUM_TOKEN`, `IBM_BACKEND_NAME` | Enables the IBM quantum processor option and hardware BB84 keys | unset |
+| `IBM_QUANTUM_TOKEN`, `IBM_QUANTUM_INSTANCE`, `IBM_BACKEND_NAME`, `IBM_WAIT_SECONDS` | Enables the IBM quantum processor option and hardware BB84 keys | unset |
 | `QPORTAL_ORIGINS` | Comma-separated allowed browser origins if the front end is hosted elsewhere | none |
 | `QPORTAL_SYNTHETIC` | `1` = fake prices for automated tests only (the site shows a red banner) | `0` |
 

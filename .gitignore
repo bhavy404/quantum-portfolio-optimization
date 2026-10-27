@@ -16,3 +16,12 @@ venv/
 Thumbs.db
 # QPortal web app runtime data (database, server secret)
 portal/data/
+
+# local junk
+.stale/
+.venv_old/
+hardware_*_run.txt
+*.db
+*.db-shm
+*.db-wal
+server_secret.key

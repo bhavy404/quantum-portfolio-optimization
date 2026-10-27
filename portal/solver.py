@@ -154,7 +154,10 @@ def _train(e_norm, n, reps, maxiter, seed=7, mixer="x", k=None):
 
     rng = np.random.default_rng(seed)
 
+    calls = [0]
+
     def cost(p):
+        calls[0] += 1
         pr = np.abs(_state(p, e_norm, n, reps, mixer, k)) ** 2
         return float(pr @ e_norm)
 
@@ -164,7 +167,7 @@ def _train(e_norm, n, reps, maxiter, seed=7, mixer="x", k=None):
         res = minimize(cost, x0, method="COBYLA", options={"maxiter": maxiter, "rhobeg": 0.5})
         if best is None or res.fun < best.fun:
             best = res
-    return best.x, float(best.fun)
+    return best.x, float(best.fun), calls[0]
 
 
 def dicke_circuit(n, k):
@@ -268,19 +271,22 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
     mu_s, sig_s = normalise(mu, sigma)
     n = len(mu_s)
     t0 = time.time()
+    exact_t0 = time.time()
     ranked = exact(mu_s, sig_s, k, q)
+    exact_seconds = round(time.time() - exact_t0, 4)
     best_exact = ranked[0]
     rank_of = {combo: r + 1 for r, (_, combo) in enumerate(ranked)}
     out = {
         "engine": engine, "qubits": n, "reps": reps, "maxiter": maxiter, "mixer": mixer,
         "exact": {"idx": list(best_exact[1]), "fval": best_exact[0]},
         "feasible_baskets": len(ranked), "backend": None, "job_id": None, "circuit_depth": None,
+        "exact_seconds": exact_seconds, "objective_exact": float(best_exact[0]),
         "cx_gates": None, "samples": [], "note": "", "shots": 0,
-        "p_best": None, "p_best_blind": 1.0 / len(ranked),
+        "p_best": None, "p_best_blind": 1.0 / len(ranked), "train_evals": 0,
     }
     if engine == "classical":
         out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True, feasible_mass=1.0,
-                   label="Classical exact search", seconds=round(time.time() - t0, 2))
+                   label="Classical exact search", seconds=round(time.time() - t0, 4), qaoa_seconds=0.0)
         return out
 
     E, feasible, penalty, X = _energies(mu_s, sig_s, k, q)
@@ -292,7 +298,8 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
         e_range = float(E.max() - E.min()) or 1.0
         e_norm = (E - E.min()) / e_range
     progress.say(f"Training the quantum circuit on a simulator ({n} qubits)")
-    params, _ = _train(e_norm, n, reps, maxiter, mixer=mixer, k=k)
+    params, _, evals = _train(e_norm, n, reps, maxiter, mixer=mixer, k=k)
+    out["train_evals"] = evals
     probs = np.abs(_state(params, e_norm, n, reps, mixer, k)) ** 2
     qp = _qubo_program(mu_s, sig_s, k, q, penalty)
     out["circuit_depth"], out["cx_gates"] = _depth(qp, params, reps, e_range, mixer, k)
@@ -347,5 +354,10 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
         out["note"] = "The circuit produced no valid basket this time, so the exact answer is shown."
     if hw_fail:
         out["note"] = hw_fail + (" " + out["note"] if out["note"] else "")
-    out["seconds"] = round(time.time() - t0, 2)
+    out["seconds"] = round(time.time() - t0, 4)
+    out["qaoa_seconds"] = round(max(0.0, out["seconds"] - exact_seconds), 4)
+    out["objective_selected"] = float(out["fval"])
+    # Lower objective is better. The percentage gap is descriptive only when the optimum is positive.
+    denom = abs(float(best_exact[0]))
+    out["objective_gap_pct"] = (100.0 * (float(out["fval"]) - float(best_exact[0])) / denom) if denom > 1e-12 else None
     return out

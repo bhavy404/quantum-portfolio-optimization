@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 
 from . import analytics as an
-from . import db, keybank, prices, progress, solver, universe
+from . import combo, db, keybank, prices, progress, sector, solver, universe
 from .universe import BENCHMARK
 
 _pool = ThreadPoolExecutor(max_workers=2)
@@ -21,7 +21,10 @@ def risk_label(q: float) -> str:
 
 
 def submit(user: dict, req: dict) -> int:
-    title = f"{len(req['symbols'])} stocks, pick {req['k']} ({risk_label(req['q'])})"
+    if req.get("mode") == "sector":
+        title = f"Sector picks: {', '.join(req['sectors'])}, hold {req['k']} ({risk_label(req['q'])})"
+    else:
+        title = f"{len(req['symbols'])} stocks, pick {req['k']} ({risk_label(req['q'])})"
     run_id = db.execute("INSERT INTO runs(user_id,status,title) VALUES (?,?,?)", (user["id"], "running", title))
     _pool.submit(_run, run_id, user["id"], req)
     return run_id
@@ -77,7 +80,36 @@ def _run(run_id: int, user_id: int, req: dict):
         progress.end(run_id)
 
 
+def _sector_prepare(req: dict) -> dict:
+    """Sector mode: short-list the best-looking few stocks in each chosen sector (by return per unit of risk on the
+    training period) so the quantum circuit stays small. The circuit then chooses among them."""
+    names = req["sectors"]
+    marks = ",".join("?" * len(names))
+    rows = db.query(f"SELECT symbol,sector FROM stocks WHERE tier='core' AND symbol NOT LIKE '^%' AND sector IN ({marks})", tuple(names))
+    by = {}
+    for r in rows:
+        by.setdefault(r["sector"], []).append(r["symbol"])
+    allsyms = [s for v in by.values() for s in v]
+    if not allsyms:
+        raise prices.DataUnavailable("No stocks are tagged with those sectors yet.")
+    pa = prices.get(allsyms)
+    px = an.clean(pa[[s for s in allsyms if s in pa.columns]])
+    ret = px.pct_change().iloc[1:]
+    train = ret.iloc[:an.split_index(len(ret))]
+    score = (train.mean() / train.std(ddof=1)).replace([np.inf, -np.inf], np.nan).dropna()
+    per = max(2, min(3, 12 // len(names)))
+    cands = {n: sorted([s for s in by.get(n, []) if s in score.index], key=lambda s: -score[s])[:per] for n in names}
+    usable_sectors = [n for n in names if len(cands[n]) >= 1]
+    if len(usable_sectors) < 2:
+        raise prices.DataUnavailable("Not enough price history in those sectors. Choose sectors with more listed stocks.")
+    return {**req, "sectors": usable_sectors, "symbols": [s for n in usable_sectors for s in cands[n]]}
+
+
 def compute(req: dict) -> dict:
+    sector_mode = req.get("mode") == "sector"
+    if sector_mode:
+        progress.say("Short-listing the strongest stocks in each sector")
+        req = _sector_prepare(req)
     symbols, k, q, amount = req["symbols"], req["k"], req["q"], req["amount"]
     px_all = prices.get(symbols, need_benchmark=True)
     bench_px = px_all[BENCHMARK].dropna() if BENCHMARK in px_all.columns else None
@@ -94,10 +126,42 @@ def compute(req: dict) -> dict:
     train, test = ret.iloc[:cut], ret.iloc[cut:]
     mu, sigma = train.mean().values * an.TD, train.cov().values * an.TD
 
-    sol = solver.solve(mu, sigma, k, q, engine=req["engine"], reps=req["reps"], maxiter=req["maxiter"], mixer=req.get("mixer", "xy"))
+    info = universe.info(usable)
+    sector_info = None
+    if sector_mode:
+        names = [n for n in req["sectors"] if any(info.get(s, {}).get("sector") == n for s in usable)]
+        members = {n: [i for i, s in enumerate(usable) if info.get(s, {}).get("sector") == n] for n in names}
+        counts = sector.allocate_counts([req.get("sector_weights", {}).get(n, 1.0) for n in names], [len(members[n]) for n in names], k)
+        groups = [(members[n], c) for n, c in zip(names, counts)]
+        sol = sector.solve_sector(mu, sigma, k, q, groups, engine=req["engine"], reps=req["reps"], maxiter=req["maxiter"])
+        sector_info = [{"name": n, "count": c, "weight": float(req.get("sector_weights", {}).get(n, 1.0)),
+                        "candidates": [usable[i] for i in members[n]], "chosen": [usable[i] for i in sol["idx"] if i in members[n]]}
+                       for n, c in zip(names, counts)]
+    else:
+        groups = [(list(range(len(usable))), k)]
+        sol = solver.solve(mu, sigma, k, q, engine=req["engine"], reps=req["reps"], maxiter=req["maxiter"], mixer=req.get("mixer", "xy"))
     chosen = [usable[i] for i in sol["idx"]]
     exact_names = [usable[i] for i in sol["exact"]["idx"]]
-    info = universe.info(usable)
+
+    # the same instance through ordinary methods, for the fair comparison table
+    progress.say("Comparing with classical methods")
+    mu_s, sig_s = solver.normalise(mu, sigma)
+    cmp_ = combo.compare(mu_s, sig_s, k, q, groups)
+    cmp_rows = []
+    if sol["engine"] != "classical":
+        cmp_rows.append({"name": sol["label"], "kind": "quantum", "stocks": chosen, "fval": sol.get("objective_selected"),
+                         "gap_pct": sol.get("objective_gap_pct"), "rank": sol.get("rank"), "matches_exact": sol.get("matches_exact"),
+                         "evals": sol.get("train_evals", 0), "seconds": sol.get("qaoa_seconds", 0.0)})
+    for r in cmp_["rows"]:
+        cmp_rows.append({"name": r["name"], "kind": "classical", "stocks": [usable[i] for i in r["idx"]], "fval": r["fval"],
+                         "gap_pct": r["gap_pct"], "rank": r["rank"], "matches_exact": r["matches_exact"],
+                         "evals": r["evals"], "seconds": r["seconds"]})
+    comparison = {"rows": cmp_rows, "feasible": cmp_["feasible"], "budget": cmp_["budget"], "qubits": sol["qubits"],
+                  "note": "Cost is counted in objective evaluations (how many candidate baskets a method scored). The quantum row counts "
+                          "circuit evaluations made while training on a classical simulator, so its seconds measure the simulator, "
+                          "not a quantum computer. The quantum row keeps the best of 2,048 measurements; at this size random sampling with the same number "
+                          "of shots would find the same basket, so the stronger test is how often the circuit puts the best basket first (see the paper). "
+                          "Greedy, annealing and random search used the same objective and constraints."}
 
     basket = an.basket_returns(ret, chosen)
     everything = an.basket_returns(ret, usable)
@@ -128,11 +192,17 @@ def compute(req: dict) -> dict:
         "dropped": dropped,
         "data": {"first": str(px.index[0].date()), "last": str(px.index[-1].date()), "days": int(len(px)),
                  "train_until": str(train.index[-1].date()), "test_from": str(test.index[0].date())},
+        "mode": "sector" if sector_mode else "basket", "sector": sector_info, "comparison": comparison,
         "chosen": chosen, "allocation": allocation, "cash_left": round(amount - sum(a["invest"] for a in allocation), 2),
         "quantum": {
             "label": sol["label"], "engine": sol["engine"], "backend": sol["backend"], "job_id": sol["job_id"],
             "qubits": sol["qubits"], "reps": sol["reps"], "mixer": sol["mixer"], "circuit_depth": sol["circuit_depth"], "cx_gates": sol["cx_gates"],
-            "seconds": sol["seconds"], "note": sol["note"], "feasible_baskets": sol["feasible_baskets"],
+            "seconds": sol["seconds"], "exact_seconds": sol.get("exact_seconds"),
+            "qaoa_seconds": sol.get("qaoa_seconds", 0.0),
+            "objective_exact": sol.get("objective_exact"),
+            "objective_selected": sol.get("objective_selected", sol.get("fval")),
+            "objective_gap_pct": sol.get("objective_gap_pct"),
+            "note": sol["note"], "feasible_baskets": sol["feasible_baskets"],
             "feasible_mass": sol["feasible_mass"], "matches_exact": sol["matches_exact"], "rank": sol["rank"],
             "shots": sol["shots"], "p_best": sol["p_best"], "p_best_blind": sol["p_best_blind"],
             "exact_choice": exact_names,

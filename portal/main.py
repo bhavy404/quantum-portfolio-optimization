@@ -12,7 +12,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from . import analytics as an
 from . import auth, config, db, jobs, keybank, prices, progress, universe
@@ -64,7 +64,10 @@ class Login(BaseModel):
 
 
 class Recommend(BaseModel):
-    symbols: List[str]
+    symbols: List[str] = []
+    mode: str = "basket"  # "basket" = pick from the shortlist; "sector" = quantum pick inside chosen sectors
+    sectors: List[str] = []
+    sector_weights: dict = {}
     k: int = Field(ge=1, le=11)
     q: float = Field(ge=0.0, le=1.0)
     amount: float = Field(default=100000, ge=1000, le=1e9)
@@ -77,10 +80,23 @@ class Recommend(BaseModel):
     @field_validator("symbols")
     @classmethod
     def _syms(cls, v):
-        v = list(dict.fromkeys(s.strip().upper() for s in v if s and s.strip()))
-        if not (config.MIN_SHORTLIST <= len(v) <= config.MAX_SHORTLIST):
-            raise ValueError(f"Choose between {config.MIN_SHORTLIST} and {config.MAX_SHORTLIST} stocks.")
-        return v
+        return list(dict.fromkeys(s.strip().upper() for s in v if s and s.strip()))
+
+    @model_validator(mode="after")
+    def _check_mode(self):
+        if self.mode == "sector":
+            self.sectors = list(dict.fromkeys(s.strip() for s in self.sectors if s and s.strip()))
+            if not (2 <= len(self.sectors) <= 5):
+                raise ValueError("Choose between 2 and 5 sectors.")
+            if self.k < len(self.sectors):
+                raise ValueError("Hold at least one stock per sector you chose.")
+            self.sector_weights = {str(a): float(b) for a, b in (self.sector_weights or {}).items() if str(a) in self.sectors}
+        elif self.mode == "basket":
+            if not (config.MIN_SHORTLIST <= len(self.symbols) <= config.MAX_SHORTLIST):
+                raise ValueError(f"Choose between {config.MIN_SHORTLIST} and {config.MAX_SHORTLIST} stocks.")
+        else:
+            raise ValueError("Unknown mode.")
+        return self
 
     @field_validator("mixer")
     @classmethod
@@ -547,7 +563,7 @@ def stock_detail(symbol: str, user=Depends(auth.current_user)):
 
 @app.post("/api/recommend")
 def recommend(body: Recommend, user=Depends(auth.current_user)):
-    if body.k >= len(body.symbols):
+    if body.mode == "basket" and body.k >= len(body.symbols):
         raise HTTPException(400, "Pick fewer stocks to hold than you shortlisted.")
     if body.engine == "qaoa_hw" and not config.IBM_TOKEN:
         raise HTTPException(400, "The IBM quantum processor is not available on this server. Choose the simulator.")

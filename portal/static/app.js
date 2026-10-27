@@ -567,6 +567,9 @@
           c.benchmark ? h("div", null, h("span", null, "Same amount in the Nifty 50"), h("b", null, inr(end(c.benchmark)))) : null,
           h("div", null, h("span", null, `Same amount across all ${R.params.symbols.length} shortlisted stocks`), h("b", null, inr(end(c.everything)))))),
       h("p", { class: "disclaimer" }, "This looks backwards. It shows how this mix would have done, not how it will do. Not investment advice."),
+      fairComparison(R),
+      sectorPanel(R),
+      methodTable(R),
       h("div", { class: "tiles" },
         tile("Growth per year", spct(m.all.annual_return, 0), signClass(m.all.annual_return), bench ? `Nifty 50: ${spct(bench.annual_return, 0)}` : ""),
         tile("Typical ups and downs", pct(m.all.volatility, 0), "", bench ? `Nifty 50: ${pct(bench.volatility, 0)}` : ""),
@@ -655,6 +658,63 @@
         h("dt", null, "Secret bits kept"), h("dd", null, String(k.secret_bits)),
         h("dt", null, "Error rate seen"), h("dd", null, pct(k.qber, 1) + " (keys are rejected above 11%)")),
       h("p", { class: "muted", style: "margin-top:12px" }, "Honest limit: the sender and receiver in the key exchange are both this server, so it is not a quantum link to your device. The final encryption key also mixes in a server secret, and your result is stored encrypted with AES-256."));
+  }
+
+  function fairComparison(R) {
+    const q = R.quantum;
+    const isClassical = q.engine === "classical";
+    const same = Boolean(q.matches_exact);
+    const fmt = (v) => Number.isFinite(Number(v)) ? Number(v).toFixed(4) : "—";
+    const gap = q.objective_gap_pct;
+    const gapText = gap === null || gap === undefined || !Number.isFinite(Number(gap))
+      ? "Not meaningful for a zero-valued optimum"
+      : `${Number(gap).toFixed(2)}% above the exact objective`;
+    return h("div", { class: "panel" },
+      h("h2", null, "Fair comparison: QAOA vs classical search"),
+      h("p", { class: "muted" }, "Both methods use the same selected stocks, training-period return/risk estimates, objective function and number-of-stocks constraint. A lower objective score is better."),
+      h("div", { class: "grid2" },
+        h("div", { class: "panel", style: "margin:0" },
+          h("h3", null, "Exact classical baseline"),
+          h("p", null, "Checks every valid combination and identifies the best portfolio for this small problem."),
+          h("dl", { class: "kv" }, h("dt", null, "Best objective score"), h("dd", null, fmt(q.objective_exact)), h("dt", null, "Search time"), h("dd", null, `${fmt(q.exact_seconds)} s`))),
+        h("div", { class: "panel", style: "margin:0" },
+          h("h3", null, isClassical ? "Selected method: classical" : q.label),
+          h("p", null, isClassical ? "This run used the exact classical method, so it is the baseline rather than a quantum comparison run." : "QAOA returns a candidate from circuit measurements; the exact method remains the reference answer."),
+          h("dl", { class: "kv" }, h("dt", null, "Selected objective score"), h("dd", null, fmt(q.objective_selected)), h("dt", null, "QAOA / extra time"), h("dd", null, `${fmt(q.qaoa_seconds)} s`), h("dt", null, "Result"), h("dd", null, isClassical ? "Classical baseline run" : (same ? "Matches exact optimum" : "Does not match exact optimum")), h("dt", null, "Objective gap"), h("dd", null, isClassical ? "0% (baseline)" : gapText)))),
+      h("p", { class: "note warn" }, "Honest limitation: matching the classical optimum does not prove quantum advantage. The simulator runs on a classical computer, and this project does not demonstrate a quantum speedup. Compare repeated runs and held-out returns before drawing broader conclusions."));
+  }
+
+  function methodTable(R) {
+    const C = R.comparison;
+    if (!C || !C.rows || !C.rows.length) return null;
+    const f = (v) => Number.isFinite(Number(v)) ? Number(v).toFixed(4) : "—";
+    const gap = (g) => g == null || !Number.isFinite(Number(g)) ? "—" : (Math.abs(g) < 0.005 ? "0%" : Number(g).toFixed(1) + "%");
+    return h("div", { class: "panel" },
+      h("h2", null, "Quantum vs ordinary methods"),
+      h("p", { class: "muted" }, `Every method solved the same problem: ${C.feasible.toLocaleString("en-IN")} valid baskets, one objective, the same stock-count rules. Lower objective is better. The sampling methods were given ${C.budget} evaluations each.`),
+      h("div", { class: "table-scroll" }, h("table", null,
+        h("thead", null, h("tr", null, ["Method", "Basket", "Objective", "Gap to best", "Rank", "Evaluations", "Seconds"].map((t) => h("th", null, t)))),
+        h("tbody", null, ...C.rows.map((r) => h("tr", null,
+          h("td", { "data-l": "Method" }, r.kind === "quantum" ? h("b", null, r.name) : r.name),
+          h("td", { "data-l": "Basket" }, r.stocks.map(short).join(", ")),
+          h("td", { class: "num", "data-l": "Objective" }, f(r.fval)),
+          h("td", { class: "num", "data-l": "Gap to best" }, gap(r.gap_pct)),
+          h("td", { class: "num", "data-l": "Rank" }, r.rank ? `#${r.rank} of ${C.feasible.toLocaleString("en-IN")}` : "—"),
+          h("td", { class: "num", "data-l": "Evaluations" }, Number(r.evals).toLocaleString("en-IN")),
+          h("td", { class: "num", "data-l": "Seconds" }, Number(r.seconds).toFixed(3))))))),
+      h("p", { class: "note warn" }, `${C.note} Matching or beating an ordinary method on one instance does not show quantum advantage. At ${C.feasible.toLocaleString("en-IN")} baskets, exact search is instant. The research paper reports the same comparison averaged over many random instances.`));
+  }
+
+  function sectorPanel(R) {
+    if (!R.sector) return null;
+    return h("div", { class: "panel" },
+      h("h2", null, "Sector-wise quantum pick"),
+      h("p", { class: "muted" }, "The sector mix decided how many stocks to hold in each sector. QAOA then chose which ones, scoring the whole portfolio's risk and return together, so correlations between sectors count. The circuit swaps stocks only inside a sector, so every measured basket keeps the sector counts."),
+      h("div", { class: "grid2" }, R.sector.map((x) => h("div", { class: "panel", style: "margin:0" },
+        h("h3", null, x.name),
+        h("p", { class: "muted" }, `Hold ${x.count} of ${x.candidates.length} short-listed stocks`),
+        h("p", null, h("b", null, x.chosen.length ? x.chosen.map(short).join(", ") : "None chosen")),
+        h("p", { class: "muted" }, "Considered: " + x.candidates.map(short).join(", "))))));
   }
 
   function how(R) {
@@ -858,6 +918,18 @@
         h("span", null, "Historical growth · 3M: " + fmtGrowth(sector.return_3m) + " · 1Y: " + fmtGrowth(sector.return_1y)),
         h("span", null, "Suggested weight across all sectors: " + suggested)));
     }
+    const qCount = h("input", { type: "number", min: 2, max: 9, value: 5, "aria-label": "Stocks to hold" });
+    const qRisk = h("select", { "aria-label": "Risk preference" }, [["0.25", "Safety first"], ["0.5", "Balanced"], ["0.8", "Growth first"]].map(([v, t]) => h("option", { value: v, selected: v === "0.5" }, t)));
+    const qEngine = h("select", { "aria-label": "Method" }, h("option", { value: "qaoa_sim" }, "Quantum circuit simulator"), S.health.ibm_configured ? h("option", { value: "qaoa_hw" }, "IBM quantum processor (queue, up to a few minutes)") : null);
+    const qErr = h("p", { class: "error" });
+    const qRun = async (ev) => {
+      ev.target.disabled = true; qErr.textContent = "";
+      const chosen = allocation();
+      try {
+        const r = await api("/api/recommend", { method: "POST", body: { mode: "sector", sectors: chosen.map((x) => x.name), sector_weights: Object.fromEntries(chosen.map((x) => [x.name, x.weight])), k: Number(qCount.value), q: Number(qRisk.value), amount: Number(amount.value) || 100000, engine: qEngine.value, mixer: "xy", hw_key: false } });
+        location.hash = "#/result/" + r.run_id;
+      } catch (ex) { qErr.textContent = ex.message; ev.target.disabled = false; }
+    };
     const buildBtn = h("button", { class: "btn", onclick: build }, "Refresh suggested combination");
     amount.addEventListener("input", build);
     shell(h("div", null,
@@ -865,6 +937,10 @@
       h("section", { class: "panel" }, h("h2", null, "1. Set portfolio size"), h("label", { class: "field" }, h("span", null, "Portfolio amount (₹)"), amount),
         h("h2", null, "2. Choose sectors (weights are automatic)"), sectorsWrap, buildBtn, note),
       h("section", { class: "panel" }, h("h2", null, "3. Suggested sector combination"), result),
+      h("section", { class: "panel" }, h("h2", null, "4. Let a quantum circuit pick the stocks inside these sectors"),
+        h("p", { class: "muted" }, "The weights above decide how many stocks each sector gets. QAOA (QUBO, XY mixer per sector) then chooses which stocks, minimising risk and return for the whole portfolio. The result page compares it with exact search, greedy, simulated annealing and random search."),
+        h("div", { class: "grid2" }, h("label", { class: "field" }, h("span", null, "Stocks to hold in total"), qCount), h("label", { class: "field" }, h("span", null, "Risk preference"), qRisk), h("label", { class: "field" }, h("span", null, "Method"), qEngine)),
+        h("button", { class: "btn", onclick: qRun }, "Run sector-wise quantum pick"), qErr),
       h("p", { class: "disclaimer" }, (data.method || "") + " " + (data.note || "")),), "sector-mix");
     build();
   }

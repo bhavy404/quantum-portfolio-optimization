@@ -1,19 +1,54 @@
-"""Sector-wise basket selection with QAOA.
+"""Sector mix and sector-wise basket selection with QAOA.
 
-The user (or the sector-mix page) fixes HOW MANY stocks to hold in each sector. QAOA then chooses WHICH stocks,
-minimising one risk/return objective for the whole portfolio, so correlations between sectors count.
+Two QAOA steps on the sector-mix page:
 
-Circuit: one Dicke start state per sector (equal mix of every way to pick that sector's count) and an XY ring mixer
-inside each sector. XY gates only swap a held stock with a not-held one in the same sector, so every measured
-basket has exactly the requested number of stocks in every sector. Sectors with nothing to choose (hold none, or
-hold all) take no qubits.
+1. Sector mix: treat each candidate sector as one asset (equal-weight proxy of its stocks). QAOA picks
+   which sectors to hold, so the mix itself is a quantum search, not only a momentum heuristic.
+2. Stock pick: the user (or step 1) fixes HOW MANY stocks to hold in each chosen sector. QAOA then chooses
+   WHICH stocks, minimising one risk/return objective for the whole portfolio, so correlations between
+   sectors count.
+
+Stock circuit: one Dicke start state per sector and an XY ring mixer inside each sector. XY gates only swap
+a held stock with a not-held one in the same sector, so every measured basket has exactly the requested
+number of stocks in every sector. Sectors with nothing to choose (hold none, or hold all) take no qubits.
 """
+import itertools
+import math
 import time
 
 import numpy as np
 
 from . import combo, config, progress, qlock
 from .solver import RESTARTS, SHOTS, dicke_circuit, normalise, ring_edges
+
+
+def shortlist_per_sector(n_sectors, k, max_qubits=12):
+    """How many stocks to keep in each sector so the stock-level circuit stays small but still has a choice."""
+    n_sectors = max(int(n_sectors), 1)
+    k = max(int(k), 1)
+    per = max(2, min(4, max_qubits // n_sectors))
+    while n_sectors * per <= k and n_sectors * (per + 1) <= max_qubits:
+        per += 1
+    return per
+
+
+def pick_sectors(mu, sigma, m, q, engine="qaoa_sim", reps=2, maxiter=100):
+    """QAOA over sector-level return/risk proxies: pick m of n candidate sectors."""
+    from .solver import solve
+
+    n = len(mu)
+    m = int(m)
+    if n == 0:
+        raise ValueError("No sectors with enough price history.")
+    if m >= n:
+        return {
+            "idx": list(range(n)), "engine": "classical", "qubits": 0, "skipped": True,
+            "label": "All candidate sectors kept", "qaoa_seconds": 0.0,
+            "matches_exact": True, "note": "QAOA is not needed to choose sectors when you already hold every candidate.",
+        }
+    out = solve(mu, sigma, m, q, engine=engine, reps=reps, maxiter=maxiter, mixer="xy")
+    out["skipped"] = False
+    return out
 
 
 def allocate_counts(weights, sizes, k):
@@ -176,8 +211,9 @@ def _run_hardware(circ, nf):
     return counts, backend.name + (f" ({note})" if note else ""), job.job_id(), int(isa.depth())
 
 
-def solve_sector(mu, sigma, k, q, groups, engine="qaoa_sim", reps=2, maxiter=100):
-    """groups = [(stock indices in one sector, how many to hold there), ...] with the counts adding up to k."""
+def solve_sector(mu, sigma, k, q, groups, engine="qaoa_sim", reps=2, maxiter=100, selection="most_frequent"):
+    """groups = [(stock indices in one sector, how many to hold there), ...] with the counts adding up to k.
+    selection: 'most_frequent' = valid basket measured most often (pure QAOA). 'best_of_shots' = best valid basket scored classically."""
     mu_s, sig_s = normalise(mu, sigma)
     n = len(mu_s)
     t0 = time.time()
@@ -196,9 +232,12 @@ def solve_sector(mu, sigma, k, q, groups, engine="qaoa_sim", reps=2, maxiter=100
         "exact_seconds": exact_seconds, "objective_exact": float(best_exact[0]), "train_evals": 0,
     }
     if engine == "classical" or nf == 0:
+        note = ""
+        if nf == 0 and engine != "classical":
+            note = "QAOA was not run for the stock pick because every sector count was already fixed (no spare stocks to choose among)."
         out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True, feasible_mass=1.0,
                    label="Classical exact search", qaoa_seconds=0.0, seconds=round(time.time() - t0, 4),
-                   objective_selected=float(best_exact[0]), objective_gap_pct=0.0, engine="classical")
+                   objective_selected=float(best_exact[0]), objective_gap_pct=0.0, engine="classical", note=note)
         return out
 
     f, valid, X = _energies(mu_s, sig_s, k, q, qubits, local, fixed)
@@ -255,7 +294,10 @@ def solve_sector(mu, sigma, k, q, groups, engine="qaoa_sim", reps=2, maxiter=100
     rows.sort(key=lambda r: -r["prob"])
     out["samples"] = rows[:12]
     if feas:
-        pick = min(feas, key=lambda r: (r["fval"], -r["prob"]))
+        if selection == "best_of_shots":
+            pick = min(feas, key=lambda r: (r["fval"], -r["prob"]))
+        else:
+            pick = max(feas, key=lambda r: (r["prob"], -r["fval"]))
         out.update(idx=pick["idx"], fval=pick["fval"], rank=pick["rank"], matches_exact=tuple(pick["idx"]) == best_key)
     else:
         out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True)
@@ -268,3 +310,66 @@ def solve_sector(mu, sigma, k, q, groups, engine="qaoa_sim", reps=2, maxiter=100
     denom = abs(float(best_exact[0]))
     out["objective_gap_pct"] = (100.0 * (float(out["fval"]) - float(best_exact[0])) / denom) if denom > 1e-12 else None
     return out
+
+
+def global_baseline(mu, sigma, k, q, members, m, selected_idx, max_baskets=300_000):
+    """End-to-end exact classical search for the whole sector-mix problem, used to judge QAOA fairly.
+
+    members: {sector name: [stock indices]} for EVERY candidate sector (not only the ones QAOA kept).
+    m: how many sectors are held. Each choice of m sectors gets the same count rule as the portal
+    (k split equally, capped by sector size, via allocate_counts), and every stock combination inside is scored.
+    selected_idx: the final basket QAOA produced (sector mix step + stock step); it is scored with the same
+    objective and normalisation so the two numbers are directly comparable.
+    Returns None when the search would be too large (the caller then keeps the stock-step-only comparison).
+    """
+    from .solver import objective
+
+    t0 = time.time()
+    mu_s, sig_s = normalise(mu, sigma)
+    n = len(mu_s)
+    names = [nm for nm, v in members.items() if v]
+    owner = {i: nm for nm, v in members.items() for i in v}
+    plans = []
+    total = 0
+    for subset in itertools.combinations(names, m):
+        sizes = [len(members[nm]) for nm in subset]
+        if k > sum(sizes):
+            continue
+        counts = allocate_counts([1.0] * m, sizes, k)
+        if sum(counts) != k:
+            continue
+        total += math.prod(math.comb(s, c) for s, c in zip(sizes, counts))
+        if total > max_baskets:
+            return None
+        plans.append([(sorted(members[nm]), c) for nm, c in zip(subset, counts)])
+    if not plans:
+        return None
+
+    chosen_t = tuple(sorted(int(i) for i in selected_idx))
+    f_sel = objective(np.bincount(list(chosen_t), minlength=n).astype(float), mu_s, sig_s, k, q)
+    best_f, best_b, all_f = None, None, []
+    for groups in plans:
+        baskets = combo.feasible_baskets(groups)
+        W = np.zeros((len(baskets), n))
+        rows = np.repeat(np.arange(len(baskets)), k)
+        W[rows, np.array(baskets).reshape(-1)] = 1.0 / k
+        f = (1 - q) * np.einsum("ij,jk,ik->i", W, sig_s, W) - q * (W @ mu_s)
+        all_f.append(f)
+        j = int(np.argmin(f))
+        if best_f is None or f[j] < best_f:
+            best_f, best_b = float(f[j]), baskets[j]
+    all_f = np.concatenate(all_f)
+    note = ""
+    if f_sel < best_f - 1e-12:
+        # QAOA's basket is not inside the baseline's sector-count rule; keep the baseline a true lower bound.
+        best_f, best_b = float(f_sel), chosen_t
+        note = "QAOA's basket used a sector split outside the baseline rule, so it is shown as the best known basket."
+    denom = abs(best_f)
+    return {
+        "objective_exact": best_f, "objective_selected": float(f_sel), "exact_idx": [int(i) for i in best_b],
+        "objective_gap_pct": (100.0 * (f_sel - best_f) / denom) if denom > 1e-12 else None,
+        "matches_exact": tuple(best_b) == chosen_t, "rank": int(1 + np.sum(all_f < f_sel - 1e-12)),
+        "feasible_baskets": int(len(all_f)), "seconds": round(time.time() - t0, 4),
+        "exact_sectors": sorted({owner[i] for i in best_b}), "selected_sectors": sorted({owner[i] for i in chosen_t if i in owner}),
+        "universe_size": int(sum(len(v) for v in members.values())), "sectors_considered": len(names), "note": note,
+    }

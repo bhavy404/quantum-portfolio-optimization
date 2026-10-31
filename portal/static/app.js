@@ -61,8 +61,11 @@
     return data;
   }
 
-  function logout() {
-    S.token = null; S.user = null; store.del("qp_token"); store.del("qp_user");
+  async function logout() {
+    if (S.token) {
+      try { await fetch("/api/auth/logout", { method: "POST", headers: { Authorization: "Bearer " + S.token } }); } catch (e) { /* local logout still proceeds */ }
+    }
+    S.token = null; S.user = null; S.welcome = null; store.del("qp_token"); store.del("qp_user");
     location.hash = "#/login"; route();
   }
 
@@ -101,11 +104,111 @@
   }
 
   // ---------- login ----------
+  function viewLoginLive() {
+    let mode = "login", eveOn = false, livePromise = null, liveExchange = null, runSerial = 0;
+    const err = h("p", { class: "error", role: "alert" });
+    const form = h("form", { novalidate: true });
+    const tabs = h("div", { class: "tabs", role: "tablist" });
+    const panel = h("div", { class: "panel live-login-panel" }, tabs, form);
+    const livePanel = h("section", { class: "panel live-bb84-panel", "aria-live": "polite" });
+    const email = () => form.querySelector('input[name="email"]')?.value || "";
+    const status = h("p", { class: "live-status muted" }, "Starting the BB84 exchange before sign-in…");
+    const attemptsBox = h("div", { class: "live-attempts" });
+    const tableBox = h("div", { class: "live-table-wrap" });
+    const keyLine = h("p", { class: "live-key-line" }, "Quantum key not ready yet.");
+    function drawLive(update) {
+      if (!update) return;
+      attemptsBox.replaceChildren(...(update.attempts || []).map(a => h("div", { class: "live-attempt " + (a.verdict === "secure" ? "is-secure" : "is-detected") },
+        h("div", { class: "live-attempt-head" }, h("b", null, `Attempt ${a.number}${a.eve ? " · Eve on the line" : " · clean channel"}`),
+          h("span", { class: "live-verdict" }, a.verdict === "secure" ? "SECURE" : "DETECTED · DISCARDED")),
+        h("p", null, `Qubits ${a.qubits || 1600} · kept ${a.sifted} · sample ${a.sample} · error ${(a.qber * 100).toFixed(1)}% · 95% upper bound ${(a.upper * 100).toFixed(1)}% · limit 11%`),
+        h("div", { class: "qber-meter" }, h("span", { class: "qber-fill", style: `width:${Math.min(100, a.qber * 250)}%` }), h("i", { class: "qber-limit-line" })))));
+      const a = update.current;
+      if (a) {
+        status.textContent = a.verdict === "secure" ? "Clean BB84 exchange accepted." : (a.eve ? "Eavesdropper detected live. Discarding this key and retrying cleanly…" : "Sample exceeded the security bound. Discarding and retrying…");
+        const rows = (a.trace.rows || []).map(r => h("tr", { class: r.mismatch ? "qkd-mismatch" : (r.kept ? "qkd-kept" : "") },
+          h("td", null, r.index), h("td", null, r.aliceBit), h("td", null, r.aliceBasis ? "X · diagonal" : "Z · rectilinear"),
+          h("td", null, r.eveBasis == null ? "—" : (r.eveBasis ? "X · diagonal" : "Z · rectilinear")),
+          h("td", null, r.bobBasis ? "X · diagonal" : "Z · rectilinear"), h("td", null, r.bobBit),
+          h("td", null, r.kept ? "Kept" : "Dropped"), h("td", null, r.mismatch ? "Mismatch" : (r.kept ? "Match" : "—"))));
+        tableBox.replaceChildren(h("table", { class: "qkd-table" },
+          h("thead", null, h("tr", null, ...["#", "Alice bit", "Alice basis", "Eve basis", "Bob basis", "Bob bit", "Sift", "Check"].map(x => h("th", null, x)))),
+          h("tbody", null, ...rows)));
+      }
+      if (update.ready) keyLine.textContent = `Quantum key ready · fingerprint ${update.fingerprint} · 256-bit HKDF-SHA256 key (never transmitted)`;
+      else keyLine.textContent = "Quantum key not ready yet.";
+    }
+    function draw() {
+      tabs.replaceChildren(
+        h("button", { type: "button", role: "tab", "aria-selected": String(mode === "login"), onclick: () => { mode = "login"; draw(); } }, "Log in"),
+        h("button", { type: "button", role: "tab", "aria-selected": String(mode === "register"), onclick: () => { mode = "register"; draw(); } }, "Create account"));
+      const eveSwitch = h("label", { class: "opt eve-live-switch" },
+        h("input", { type: "checkbox", name: "eve_on", checked: eveOn, onchange: e => { eveOn = e.target.checked; startExchange(); } }),
+        h("span", null, "Eve is on the line"));
+      form.replaceChildren(...[
+        mode === "register" ? h("label", { class: "field" }, h("span", null, "Your name"), h("input", { type: "text", name: "name", autocomplete: "name" })) : null,
+        h("label", { class: "field" }, h("span", null, "Email"), h("input", { type: "email", name: "email", autocomplete: "email", required: true })),
+        h("label", { class: "field" }, h("span", null, "Password"), h("input", { type: "password", name: "password", autocomplete: mode === "login" ? "current-password" : "new-password", required: true, minLength: 8 }),
+          mode === "register" ? h("small", { class: "muted" }, "At least 8 characters. Use a throwaway password for the class demo.") : null),
+        h("div", { class: "live-eve-control" }, eveSwitch, h("small", { class: "muted" }, "When enabled, Eve intercepts the first exchange. It should be caught and discarded before a clean retry.")),
+        err, h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account")].filter(Boolean));
+      err.textContent = "";
+    }
+    function startExchange() {
+      const serial = ++runSerial;
+      liveExchange = null;
+      keyLine.textContent = "Quantum key not ready yet.";
+      status.textContent = eveOn ? "Starting exchange with Eve enabled…" : "Starting clean BB84 exchange…";
+      livePromise = QPortalBB84Live.run(eveOn, email(), drawLive).then(result => {
+        if (serial === runSerial) { liveExchange = result; drawLive({ attempts: result.attempts, current: result.attempts[result.attempts.length - 1], ready: true, fingerprint: result.fingerprint }); }
+        return result;
+      }).catch(ex => { if (serial === runSerial) { status.textContent = ex.message; keyLine.textContent = "Quantum key unavailable."; err.textContent = ex.message; } throw ex; });
+      livePromise.catch(() => {});
+    }
+    form.addEventListener("submit", async e => {
+      e.preventDefault();
+      const fd = new FormData(form), emailValue = String(fd.get("email") || "").trim();
+      err.textContent = "";
+      const btn = form.querySelector('button[type="submit"]'); btn.disabled = true;
+      const busy = h("div", { class: "securing", role: "status" }, h("div", { class: "qdots" }, h("i"), h("i"), h("i"), h("i"), h("i")),
+        h("h3", null, "Verifying the live BB84 proof"), h("p", { class: "muted" }, "The browser derives the key locally and sends only a one-time HMAC proof."));
+      form.style.display = "none"; tabs.style.display = "none"; panel.append(busy);
+      try {
+        const exchange = await livePromise;
+        const proofMode = mode === "register" ? "signup" : "login";
+        const proof = await exchange.makeProof(emailValue, proofMode);
+        const out = await api("/api/auth/" + (mode === "register" ? "register" : "login"), { method: "POST", body: {
+          email: emailValue, password: fd.get("password"), name: fd.get("name") || "",
+          session_id: exchange.session_id, proof
+        }});
+        if (mode === "register") {
+          // Sign-up only creates the account; the person must then log in with their own BB84 exchange.
+          busy.remove(); form.style.display = ""; tabs.style.display = ""; mode = "login"; draw();
+          err.textContent = "Account created. Now log in with the same email and password."; err.style.color = "#6fcf97";
+          startExchange(); return;
+        }
+        err.style.color = "";
+        S.token = out.token; S.user = out.user; store.set("qp_token", out.token); store.set("qp_user", out.user);
+        S.welcome = null; location.hash = "#/home"; route();
+      } catch (ex) { busy.remove(); form.style.display = ""; tabs.style.display = ""; err.style.color = ""; err.textContent = ex.message; btn.disabled = false; startExchange(); }
+    });
+    draw();
+    livePanel.append(status, attemptsBox, tableBox, keyLine);
+    shell(h("div", { class: "login" },
+      h("div", { class: "pitch" }, h("h1", null, "Pick stocks with less guesswork"),
+        h("p", null, "Choose the Indian companies you are considering, tell us how much risk you can live with, and get a suggested mix."),
+        h("p", { class: "live-simulation-note" }, "Qubits are simulated in this demo. Alice is the portal; Bob is this browser. The protocol, detection and derived key are real, but there is no quantum channel to your device.")),
+      panel, livePanel));
+    startExchange();
+  }
+
   function viewLogin() {
+    if (S.health && S.health.login_mode === "live") return viewLoginLive();
     let mode = "login";
     const err = h("p", { class: "error", role: "alert" });
     const form = h("form", { novalidate: true });
     const tabs = h("div", { class: "tabs", role: "tablist" });
+    const panel = h("div", { class: "panel" }, tabs, form);
     function draw() {
       tabs.replaceChildren(
         h("button", { type: "button", role: "tab", "aria-selected": String(mode === "login"), onclick: () => { mode = "login"; draw(); } }, "Log in"),
@@ -115,6 +218,10 @@
         h("label", { class: "field" }, h("span", null, "Email"), h("input", { type: "email", name: "email", autocomplete: "email", required: true })),
         h("label", { class: "field" }, h("span", null, "Password"), h("input", { type: "password", name: "password", autocomplete: mode === "login" ? "current-password" : "new-password", required: true, minLength: 8 }),
           mode === "register" ? h("small", { class: "muted" }, "At least 8 characters.") : null),
+        h("details", { class: "sec-opts" }, h("summary", null, "Security options"),
+          h("p", { class: "muted" }, "Every sign-in runs a fresh BB84 quantum key exchange and makes a new authentication key. No eavesdropper is simulated unless you choose to."),
+          h("label", { class: "opt" }, h("input", { type: "checkbox", name: "eve_test" }), h("span", null, "Put an eavesdropper inside this login attempt (the attacked key must be rejected, then login retries cleanly)")),
+          S.health && S.health.ibm_configured ? h("label", { class: "opt" }, h("input", { type: "checkbox", name: "use_ibm", checked: S.health.login_target !== "simulator" }), h("span", null, "Use a real IBM quantum processor for this login attempt (optional; may wait in a hardware queue). Simulator is the default.")) : null),
         err,
         h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account")].filter(Boolean));
       err.textContent = "";
@@ -123,11 +230,16 @@
       e.preventDefault();
       const fd = new FormData(form); err.textContent = "";
       const btn = form.querySelector("button[type=submit]"); btn.disabled = true;
+      const eveTest = fd.get("eve_test") === "on", ibmShown = !!(S.health && S.health.ibm_configured), useIbm = ibmShown ? fd.get("use_ibm") === "on" : false;
+      const busy = h("div", { class: "securing", role: "status" }, h("div", { class: "qdots", "aria-hidden": "true" }, h("i"), h("i"), h("i"), h("i"), h("i")),
+        h("h3", null, "Securing your session"),
+        h("p", { class: "muted" }, useIbm ? "Running BB84 on a real IBM quantum computer. IBM has a queue, so this can take a few minutes; it falls back to the simulator if IBM is slow." : "Running the BB84 key exchange, checking for eavesdroppers and deriving your authentication key…"));
+      form.style.display = "none"; tabs.style.display = "none"; panel.append(busy);
       try {
-        const out = await api("/api/auth/" + mode, { method: "POST", body: { email: fd.get("email"), password: fd.get("password"), name: fd.get("name") || "" } });
+        const out = await api("/api/auth/" + mode, { method: "POST", body: Object.assign({ email: fd.get("email"), password: fd.get("password"), name: fd.get("name") || "", eve_test: eveTest }, ibmShown ? { use_ibm: useIbm } : {}) });
         S.token = out.token; S.user = out.user; store.set("qp_token", out.token); store.set("qp_user", out.user);
-        location.hash = "#/home"; route();
-      } catch (ex) { err.textContent = ex.message; btn.disabled = false; }
+        S.welcome = out.security; location.hash = "#/welcome"; route();
+      } catch (ex) { busy.remove(); form.style.display = ""; tabs.style.display = ""; err.textContent = ex.message; btn.disabled = false; }
     });
     draw();
     shell(h("div", { class: "login" },
@@ -137,8 +249,9 @@
         h("ul", null,
           h("li", null, "See every stock's growth and risk on one map."),
           h("li", null, "A quantum-computing method picks the mix, and an exact check confirms it."),
+          h("li", null, "Every sign-in runs a BB84 quantum key exchange, checks for eavesdroppers and makes a fresh authentication key."),
           h("li", null, "Your saved results are encrypted with a key built from quantum circuits."))),
-      h("div", { class: "panel" }, tabs, form)));
+      panel));
   }
 
   // ---------- market home: indices are shown before the stock picker ----------
@@ -663,24 +776,39 @@
   function fairComparison(R) {
     const q = R.quantum;
     const isClassical = q.engine === "classical";
-    const same = Boolean(q.matches_exact);
+    const g = !isClassical && R.global_compare ? R.global_compare : null;  // sector mode: exact search over ALL candidate sectors
+    const same = Boolean(g ? g.matches_exact : q.matches_exact);
     const fmt = (v) => Number.isFinite(Number(v)) ? Number(v).toFixed(4) : "—";
-    const gap = q.objective_gap_pct;
+    const gap = g ? g.objective_gap_pct : q.objective_gap_pct;
     const gapText = gap === null || gap === undefined || !Number.isFinite(Number(gap))
       ? "Not meaningful for a zero-valued optimum"
       : `${Number(gap).toFixed(2)}% above the exact objective`;
+    const mixTime = g && R.sector_mix ? Number(R.sector_mix.qaoa_seconds || 0) : 0;
+    const exactRows = g
+      ? h("dl", { class: "kv" }, h("dt", null, "Best objective score"), h("dd", null, fmt(g.objective_exact)), h("dt", null, "Search time"), h("dd", null, `${fmt(g.seconds)} s`),
+          h("dt", null, "Portfolios checked"), h("dd", null, Number(g.feasible_baskets).toLocaleString("en-IN")), h("dt", null, "Best portfolio"), h("dd", null, g.exact_stocks.map(short).join(", ")))
+      : h("dl", { class: "kv" }, h("dt", null, "Best objective score"), h("dd", null, fmt(q.objective_exact)), h("dt", null, "Search time"), h("dd", null, `${fmt(q.exact_seconds)} s`));
+    const selRows = h("dl", { class: "kv" }, h("dt", null, "Selected objective score"), h("dd", null, fmt(g ? g.objective_selected : q.objective_selected)),
+      h("dt", null, "QAOA / extra time"), h("dd", null, `${fmt(Number(q.qaoa_seconds || 0) + mixTime)} s`),
+      h("dt", null, "Result"), h("dd", null, isClassical ? "Classical baseline run" : (same ? "Matches exact optimum" : "Does not match exact optimum")),
+      g ? [h("dt", null, "Rank among all portfolios"), h("dd", null, `#${Number(g.rank).toLocaleString("en-IN")} of ${Number(g.feasible_baskets).toLocaleString("en-IN")}`)] : null,
+      h("dt", null, "Objective gap"), h("dd", null, isClassical ? "0% (baseline)" : gapText));
     return h("div", { class: "panel" },
       h("h2", null, "Fair comparison: QAOA vs classical search"),
-      h("p", { class: "muted" }, "Both methods use the same selected stocks, training-period return/risk estimates, objective function and number-of-stocks constraint. A lower objective score is better."),
+      h("p", { class: "muted" }, g
+        ? `Both methods are scored with the same objective on the same stock universe: the short-listed stocks of all ${g.sectors_considered} candidate sectors, training-period return/risk estimates and the same holding rules. The exact search is free to choose any sector mix; QAOA's sector and stock choices are scored afterwards. A lower objective score is better.`
+        : "Both methods use the same selected stocks, training-period return/risk estimates, objective function and number-of-stocks constraint. A lower objective score is better."),
       h("div", { class: "grid2" },
         h("div", { class: "panel", style: "margin:0" },
           h("h3", null, "Exact classical baseline"),
-          h("p", null, "Checks every valid combination and identifies the best portfolio for this small problem."),
-          h("dl", { class: "kv" }, h("dt", null, "Best objective score"), h("dd", null, fmt(q.objective_exact)), h("dt", null, "Search time"), h("dd", null, `${fmt(q.exact_seconds)} s`))),
+          h("p", null, g ? "Checks every sector mix and every valid stock combination across all candidate sectors and identifies the best portfolio." : "Checks every valid combination and identifies the best portfolio for this small problem."),
+          exactRows),
         h("div", { class: "panel", style: "margin:0" },
           h("h3", null, isClassical ? "Selected method: classical" : q.label),
-          h("p", null, isClassical ? "This run used the exact classical method, so it is the baseline rather than a quantum comparison run." : "QAOA returns a candidate from circuit measurements; the exact method remains the reference answer."),
-          h("dl", { class: "kv" }, h("dt", null, "Selected objective score"), h("dd", null, fmt(q.objective_selected)), h("dt", null, "QAOA / extra time"), h("dd", null, `${fmt(q.qaoa_seconds)} s`), h("dt", null, "Result"), h("dd", null, isClassical ? "Classical baseline run" : (same ? "Matches exact optimum" : "Does not match exact optimum")), h("dt", null, "Objective gap"), h("dd", null, isClassical ? "0% (baseline)" : gapText)))),
+          h("p", null, isClassical ? "This run used the exact classical method, so it is the baseline rather than a quantum comparison run." : (g ? "QAOA chose the sector mix, then the stocks inside it; the final portfolio is scored here with the same objective as the baseline." : "QAOA returns a candidate from circuit measurements; the exact method remains the reference answer.")),
+          selRows)),
+      g ? h("p", { class: "muted", style: "margin-top:12px" }, `Stock-pick step alone (given the sector mix QAOA chose): exact ${fmt(q.objective_exact)} vs QAOA ${fmt(q.objective_selected)}. ` + (g.exact_sectors && g.selected_sectors && g.exact_sectors.join() !== g.selected_sectors.join() ? `The exact search preferred a different sector mix (${g.exact_sectors.join(", ")}) from QAOA's (${g.selected_sectors.join(", ")}).` : "Both used the same sector mix.")) : null,
+      g && g.note ? h("p", { class: "muted" }, g.note) : null,
       h("p", { class: "note warn" }, "Honest limitation: matching the classical optimum does not prove quantum advantage. The simulator runs on a classical computer, and this project does not demonstrate a quantum speedup. Compare repeated runs and held-out returns before drawing broader conclusions."));
   }
 
@@ -707,12 +835,17 @@
 
   function sectorPanel(R) {
     if (!R.sector) return null;
+    const mix = R.sector_mix || {};
+    const mixLine = mix.skipped
+      ? "Every candidate sector was kept, so QAOA did not need to choose the mix. It then chose which stocks to hold in those sectors."
+      : `QAOA first chose the sector mix (${(mix.chosen || []).join(", ") || "—"}) from ${(mix.candidates || []).length} candidates, then chose which stocks to hold inside those sectors.`;
     return h("div", { class: "panel" },
-      h("h2", null, "Sector-wise quantum pick"),
-      h("p", { class: "muted" }, "The sector mix decided how many stocks to hold in each sector. QAOA then chose which ones, scoring the whole portfolio's risk and return together, so correlations between sectors count. The circuit swaps stocks only inside a sector, so every measured basket keeps the sector counts."),
+      h("h2", null, "QAOA sector mix"),
+      h("p", { class: "muted" }, mixLine + " The stock circuit swaps names only inside a sector, so every measured basket keeps the sector counts. Objective scores use the whole portfolio, so correlations between sectors count."),
+      mix.label ? h("p", { class: "muted" }, mix.label + (mix.qubits ? ` · ${mix.qubits} sector qubits` : "")) : null,
       h("div", { class: "grid2" }, R.sector.map((x) => h("div", { class: "panel", style: "margin:0" },
         h("h3", null, x.name),
-        h("p", { class: "muted" }, `Hold ${x.count} of ${x.candidates.length} short-listed stocks`),
+        h("p", { class: "muted" }, `Hold ${x.count} of ${x.candidates.length} short-listed stocks · mix ${(x.weight * 100).toFixed(0)}%`),
         h("p", null, h("b", null, x.chosen.length ? x.chosen.map(short).join(", ") : "None chosen")),
         h("p", { class: "muted" }, "Considered: " + x.candidates.map(short).join(", "))))));
   }
@@ -870,79 +1003,120 @@
     const selected = new Set();
     const sectorsWrap = h("div", { class: "sector-choice-grid" });
     const result = h("div", { class: "sector-results" });
-    const note = h("p", { class: "muted" }, "The website calculates suggested weights from historical sector-stock performance. You can choose which sectors to include; weights are recalculated automatically.");
+    const note = h("p", { class: "muted" }, "Tick the sectors QAOA may use. Historical growth is only a hint for which candidates to include; QAOA chooses the mix.");
     const fmtGrowth = (v) => v == null || !Number.isFinite(Number(v)) ? "Not enough data" : (v >= 0 ? "+" : "−") + Math.abs(v * 100).toFixed(1) + "%";
     const formatSuggested = (v) => (v * 100).toFixed(1) + "%";
     const byName = new Map((data.sectors || []).map((x) => [x.name, x]));
     const rankedSectors = [...(data.sectors || [])].sort((a, b) => (b.momentum ?? -Infinity) - (a.momentum ?? -Infinity));
-    // Start with up to five sectors with the strongest available observed momentum.
-    rankedSectors.slice(0, Math.min(5, rankedSectors.length)).forEach((x) => selected.add(x.name));
-    function allocation() {
-      const chosen = [...selected].map((name) => byName.get(name)).filter(Boolean);
-      const totalScore = chosen.reduce((sum, x) => sum + (Number(x.score) || 0), 0);
-      return chosen.map((sector) => ({ ...sector, weight: totalScore ? sector.score / totalScore : 1 / Math.max(1, chosen.length) }));
+    rankedSectors.slice(0, Math.min(8, rankedSectors.length)).forEach((x) => selected.add(x.name));
+    const qHold = h("input", { type: "number", min: 2, max: 5, value: 4, "aria-label": "Sectors for QAOA to hold" });
+    const qCount = h("input", { type: "number", min: 2, max: 9, value: 5, "aria-label": "Stocks to hold" });
+    const qRisk = h("select", { "aria-label": "Risk preference" }, [["0.25", "Safety first"], ["0.5", "Balanced"], ["0.8", "Growth first"]].map(([v, t]) => h("option", { value: v, selected: v === "0.5" }, t)));
+    const qEngine = h("select", { "aria-label": "Method" }, h("option", { value: "qaoa_sim" }, "Quantum circuit simulator"), S.health.ibm_configured ? h("option", { value: "qaoa_hw" }, "IBM quantum processor for the stock pick (queue, up to a few minutes)") : null);
+    const qErr = h("p", { class: "error" });
+    const runBtn = h("button", { class: "btn" }, "Run QAOA sector mix");
+    function candidates() {
+      return [...selected].map((name) => byName.get(name)).filter(Boolean);
     }
-    function build() {
-      const chosen = allocation();
-      if (chosen.length < 2) { note.textContent = "Choose at least two sectors. QPortal will suggest their relative weights automatically."; result.replaceChildren(); return; }
-      const invested = Math.max(0, Number(amount.value) || 0);
-      const rows = [];
-      const sectorCards = chosen.map((sector) => {
-        const sectorMoney = invested * sector.weight;
-        const stocks = (sector.stocks || []).slice(0, 4);
-        const perStock = stocks.length ? sectorMoney / stocks.length : 0;
-        stocks.forEach((stock) => rows.push({ ...stock, sector: sector.name, weight: sector.weight / Math.max(1, stocks.length), amount: perStock }));
-        return h("article", { class: "sector-result-card" },
-          h("div", { class: "sector-result-head" }, h("h3", null, sector.name), h("b", null, formatSuggested(sector.weight))),
-          h("p", { class: "muted" }, inr(sectorMoney) + " suggested allocation"),
-          h("p", { class: "muted" }, "3-month growth: " + fmtGrowth(sector.return_3m) + " · 1-year growth: " + fmtGrowth(sector.return_1y)),
-          h("p", { class: "sector-stock-list" }, stocks.map((x) => x.name).join(" · ") || "No starter stocks available"),
-          h("div", { class: "bar-track" }, h("span", { class: "bar", style: "width:" + (sector.weight * 100) + "%" })));
-      });
-      const table = h("table", { class: "stocks" }, h("thead", null, h("tr", null, ...["Sector", "Example stock", "Portfolio weight", "Illustrative allocation"].map((x) => h("th", null, x)))),
-        h("tbody", null, ...rows.map((r) => h("tr", null, h("td", { "data-l": "Sector" }, r.sector), h("td", { "data-l": "Example stock" }, h("b", null, r.name), h("small", null, r.symbol.replace(".NS", ""))), h("td", { class: "num", "data-l": "Portfolio weight" }, (r.weight * 100).toFixed(2) + "%"), h("td", { class: "num", "data-l": "Illustrative allocation" }, inr(r.amount))))));
+    function hint() {
+      const chosen = candidates();
+      const hold = Math.min(5, Math.max(2, Number(qHold.value) || 4));
+      if (chosen.length < 2) {
+        note.textContent = "Choose at least two sectors as candidates for the QAOA mix.";
+        return;
+      }
+      if (chosen.length > hold) {
+        note.textContent = `QAOA will choose ${hold} of these ${chosen.length} sectors from their return/risk proxies, then pick stocks inside that mix. Historical growth below is only for browsing candidates.`;
+      } else {
+        note.textContent = `All ${chosen.length} ticked sectors will be kept (nothing for the mix circuit to drop). QAOA then picks which stocks to hold in those sectors.`;
+      }
+    }
+    function preview() {
+      hint();
+      const chosen = candidates();
+      if (chosen.length < 2) { result.replaceChildren(); return; }
       result.replaceChildren(
-        h("div", { class: "tiles" }, h("div", { class: "tile" }, h("b", null, inr(invested)), h("span", null, "Portfolio amount")), h("div", { class: "tile" }, h("b", null, chosen.length), h("span", null, "Sectors included")), h("div", { class: "tile" }, h("b", null, rows.length), h("span", null, "Example stocks")),
-        h("div", { class: "tile" }, h("b", null, data.synthetic ? "Synthetic" : "Historical"), h("span", null, "Price data mode"))),
-        h("div", { class: "sector-result-grid" }, sectorCards), h("h2", null, "Illustrative stock allocation"), table);
-      note.textContent = "Suggested weights are normalized to 100% among selected sectors. They use 35% 3-month and 65% 1-year average price performance; up to four starter stocks per sector are shown with equal weights within that sector. This is a historical-momentum heuristic, not a forecast or optimized portfolio.";
+        h("p", { class: "muted" }, "Candidate sectors (QAOA mix is not shown until you run it):"),
+        h("div", { class: "sector-result-grid" }, chosen.map((sector) => h("article", { class: "sector-result-card" },
+          h("div", { class: "sector-result-head" }, h("h3", null, sector.name), h("b", null, formatSuggested(sector.suggested_weight))),
+          h("p", { class: "muted" }, "3-month growth: " + fmtGrowth(sector.return_3m) + " · 1-year growth: " + fmtGrowth(sector.return_1y)),
+          h("p", { class: "sector-stock-list" }, (sector.stocks || []).slice(0, 4).map((x) => x.name).join(" · ") || "No starter stocks")))));
     }
+    function drawMix(run) {
+      const R = run.result, mix = R.sector_mix || {}, invested = R.params.amount;
+      const qaoaOn = mix.engine && mix.engine !== "classical" && !mix.skipped;
+      const cards = (R.sector || []).map((sector) => h("article", { class: "sector-result-card" },
+        h("div", { class: "sector-result-head" }, h("h3", null, sector.name), h("b", null, (sector.weight * 100).toFixed(1) + "%")),
+        h("p", { class: "muted" }, inr(invested * sector.weight) + " in this sector"),
+        h("p", null, h("b", null, sector.chosen.length ? sector.chosen.map(short).join(", ") : "None")),
+        h("p", { class: "muted" }, "QAOA considered " + sector.candidates.map(short).join(", ")),
+        h("div", { class: "bar-track" }, h("span", { class: "bar", style: "width:" + (sector.weight * 100) + "%" }))));
+      const table = h("table", { class: "stocks" }, h("thead", null, h("tr", null, ...["Sector", "QAOA stock", "Portfolio weight", "Allocation"].map((x) => h("th", null, x)))),
+        h("tbody", null, ...(R.allocation || []).map((r) => h("tr", null, h("td", { "data-l": "Sector" }, r.sector), h("td", { "data-l": "QAOA stock" }, h("b", null, r.name), h("small", null, short(r.symbol))), h("td", { class: "num", "data-l": "Portfolio weight" }, (r.weight * 100).toFixed(2) + "%"), h("td", { class: "num", "data-l": "Allocation" }, inr(r.invest))))));
+      result.replaceChildren(
+        h("div", { class: "tiles" },
+          h("div", { class: "tile" }, h("b", null, inr(invested)), h("span", null, "Portfolio amount")),
+          h("div", { class: "tile" }, h("b", null, (R.sector || []).length), h("span", null, "Sectors QAOA kept")),
+          h("div", { class: "tile" }, h("b", null, (R.chosen || []).length), h("span", null, "Stocks QAOA picked")),
+          h("div", { class: "tile" }, h("b", null, qaoaOn ? "QAOA mix" : (mix.skipped ? "All candidates" : "Classical mix")), h("span", null, mix.label || "Sector mix"))),
+        h("p", { class: "muted" }, mix.note || (qaoaOn ? "QAOA chose this sector mix, then the stocks inside it." : "")),
+        h("div", { class: "sector-result-grid" }, cards),
+        h("h2", null, "QAOA stock allocation"), table,
+        h("p", null, h("a", { class: "btn alt", href: "#/result/" + run.id }, "Open full comparison and charts")));
+    }
+    async function pollMix(id, t0) {
+      let r;
+      try { r = await api("/api/runs/" + id); }
+      catch (ex) { qErr.textContent = ex.message; runBtn.disabled = false; return; }
+      if (r.status === "running") {
+        result.replaceChildren(h("div", { class: "waiting" }, h("div", { class: "spinner" }), h("p", { class: "muted" }, (r.stage ? r.stage + ". " : "Running QAOA sector mix. ") + Math.round((Date.now() - t0) / 1000) + "s so far.")));
+        timer = setTimeout(() => pollMix(id, t0), 1500); return;
+      }
+      runBtn.disabled = false;
+      if (r.status === "failed") { qErr.textContent = r.error || "The QAOA mix failed."; preview(); return; }
+      drawMix(r);
+    }
+    const qRun = async (ev) => {
+      ev.target.disabled = true; qErr.textContent = "";
+      const chosen = candidates();
+      const sectorK = Math.min(chosen.length, Math.max(2, Number(qHold.value) || 4));
+      const k = Math.max(sectorK, Number(qCount.value) || 5);
+      try {
+        const r = await api("/api/recommend", { method: "POST", body: { mode: "sector", sectors: chosen.map((x) => x.name), sector_k: sectorK, k, q: Number(qRisk.value), amount: Number(amount.value) || 100000, engine: qEngine.value || "qaoa_sim", mixer: "xy", hw_key: false } });
+        pollMix(r.run_id, Date.now());
+      } catch (ex) { qErr.textContent = ex.message; ev.target.disabled = false; }
+    };
+    runBtn.addEventListener("click", qRun);
     for (const sector of data.sectors || []) {
       const checked = h("input", { type: "checkbox", checked: selected.has(sector.name), "aria-label": "Include " + sector.name, onchange: (event) => {
-        if (event.target.checked) selected.add(sector.name); else selected.delete(sector.name);
-        build();
+        if (event.target.checked) {
+          if (selected.size >= 12) { event.target.checked = false; qErr.textContent = "QAOA can search at most 12 candidate sectors."; return; }
+          selected.add(sector.name);
+        } else selected.delete(sector.name);
+        qErr.textContent = ""; preview();
       } });
       const suggested = sector.suggested_weight == null ? "—" : formatSuggested(sector.suggested_weight);
       sectorsWrap.append(h("label", { class: "sector-choice" },
         h("div", { class: "sector-choice-title" }, checked, h("b", null, sector.name), h("small", null, (sector.stock_count || 0) + " starter stocks")),
         h("span", null, "Historical growth · 3M: " + fmtGrowth(sector.return_3m) + " · 1Y: " + fmtGrowth(sector.return_1y)),
-        h("span", null, "Suggested weight across all sectors: " + suggested)));
+        h("span", null, "Momentum share if used as a hint: " + suggested)));
     }
-    const qCount = h("input", { type: "number", min: 2, max: 9, value: 5, "aria-label": "Stocks to hold" });
-    const qRisk = h("select", { "aria-label": "Risk preference" }, [["0.25", "Safety first"], ["0.5", "Balanced"], ["0.8", "Growth first"]].map(([v, t]) => h("option", { value: v, selected: v === "0.5" }, t)));
-    const qEngine = h("select", { "aria-label": "Method" }, h("option", { value: "qaoa_sim" }, "Quantum circuit simulator"), S.health.ibm_configured ? h("option", { value: "qaoa_hw" }, "IBM quantum processor (queue, up to a few minutes)") : null);
-    const qErr = h("p", { class: "error" });
-    const qRun = async (ev) => {
-      ev.target.disabled = true; qErr.textContent = "";
-      const chosen = allocation();
-      try {
-        const r = await api("/api/recommend", { method: "POST", body: { mode: "sector", sectors: chosen.map((x) => x.name), sector_weights: Object.fromEntries(chosen.map((x) => [x.name, x.weight])), k: Number(qCount.value), q: Number(qRisk.value), amount: Number(amount.value) || 100000, engine: qEngine.value, mixer: "xy", hw_key: false } });
-        location.hash = "#/result/" + r.run_id;
-      } catch (ex) { qErr.textContent = ex.message; ev.target.disabled = false; }
-    };
-    const buildBtn = h("button", { class: "btn", onclick: build }, "Refresh suggested combination");
-    amount.addEventListener("input", build);
+    qHold.addEventListener("input", hint);
     shell(h("div", null,
-      h("section", { class: "pagehead" }, h("p", { class: "eyebrow" }, "DIVERSIFICATION WORKSPACE"), h("h1", null, "Auto-weighted sector portfolio"), h("p", null, "QPortal suggests sector weights from available historical stock-price growth. Select or deselect sectors; the site automatically redistributes weights across your chosen combination.")),
-      h("section", { class: "panel" }, h("h2", null, "1. Set portfolio size"), h("label", { class: "field" }, h("span", null, "Portfolio amount (₹)"), amount),
-        h("h2", null, "2. Choose sectors (weights are automatic)"), sectorsWrap, buildBtn, note),
-      h("section", { class: "panel" }, h("h2", null, "3. Suggested sector combination"), result),
-      h("section", { class: "panel" }, h("h2", null, "4. Let a quantum circuit pick the stocks inside these sectors"),
-        h("p", { class: "muted" }, "The weights above decide how many stocks each sector gets. QAOA (QUBO, XY mixer per sector) then chooses which stocks, minimising risk and return for the whole portfolio. The result page compares it with exact search, greedy, simulated annealing and random search."),
-        h("div", { class: "grid2" }, h("label", { class: "field" }, h("span", null, "Stocks to hold in total"), qCount), h("label", { class: "field" }, h("span", null, "Risk preference"), qRisk), h("label", { class: "field" }, h("span", null, "Method"), qEngine)),
-        h("button", { class: "btn", onclick: qRun }, "Run sector-wise quantum pick"), qErr),
+      h("section", { class: "pagehead" }, h("p", { class: "eyebrow" }, "DIVERSIFICATION WORKSPACE"), h("h1", null, "QAOA sector mix"), h("p", null, "Tick candidate sectors, then run QAOA. The circuit first chooses which sectors to hold from their return and risk, then chooses the stocks inside that mix.")),
+      h("section", { class: "panel" }, h("h2", null, "1. Portfolio size and QAOA settings"),
+        h("div", { class: "grid2" },
+          h("label", { class: "field" }, h("span", null, "Portfolio amount (₹)"), amount),
+          h("label", { class: "field" }, h("span", null, "Sectors for QAOA to hold"), qHold),
+          h("label", { class: "field" }, h("span", null, "Stocks to hold in total"), qCount),
+          h("label", { class: "field" }, h("span", null, "Risk preference"), qRisk),
+          h("label", { class: "field" }, h("span", null, "Stock-pick method"), qEngine)),
+        h("p", { class: "muted" }, "The sector-mix circuit always runs on the simulator (a handful of sector qubits). The stock pick can use the IBM processor when it is configured.")),
+      h("section", { class: "panel" }, h("h2", null, "2. Candidate sectors (QAOA searches this list)"), sectorsWrap, note),
+      h("section", { class: "panel" }, h("h2", null, "3. QAOA mix and stock pick"),
+        runBtn, qErr, result),
       h("p", { class: "disclaimer" }, (data.method || "") + " " + (data.note || "")),), "sector-mix");
-    build();
+    preview();
   }
 
   // ---------- fundamentals and fundamental stock ranker ----------
@@ -1126,33 +1300,248 @@
     shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "My results"), h("p", null, "Every analysis is stored encrypted with your own key.")), h("div", { class: "panel" }, list), h("a", { class: "btn", href: "#/" }, "Start a new analysis")), "history");
   }
 
-  // ---------- security ----------
+  // ---------- security: BB84 handshake panels (used after sign-in and on the Security page) ----------
+  const SRC = { hardware: "IBM quantum processor", simulator: "Qiskit Aer simulator", model: "Python BB84 model" };
+  const num = (n) => Number(n).toLocaleString("en-IN");
+
+  // Error-rate bar on a 0-30% scale with the 11% abort limit marked.
+  function gauge(qber, limit, bad, label) {
+    const w = (v) => Math.min(v / 0.30, 1) * 100;
+    return h("div", { class: "gauge" + (bad ? " bad" : ""), role: "img", "aria-label": `${label}: ${pct(qber, 1)} error rate, abort limit ${pct(limit, 0)}` },
+      h("div", { class: "gauge-track" },
+        h("div", { class: "gauge-fill", style: `width:${w(qber)}%` }),
+        h("div", { class: "gauge-limit", style: `left:${w(limit)}%` }, h("span", null, pct(limit, 0) + " limit"))),
+      h("div", { class: "gauge-scale" }, h("span", null, "0%"), h("span", null, "30%")),
+      h("div", { class: "gauge-value num" }, pct(qber, 1)));
+  }
+
+  // qubits sent -> bases matched -> compared -> secret bits
+  function funnel(x) {
+    const rows = [["Qubits sent", x.raw_qubits], ["Bases matched (sifted)", x.sifted_bits], ["Compared in public to check errors", x.sample_bits], ["Secret bits kept", x.secret_bits]];
+    const max = x.raw_qubits || 1;
+    return h("div", { class: "funnel" }, rows.map(([l, v]) => h("div", { class: "funnel-row" },
+      h("span", { class: "funnel-label" }, l), h("div", { class: "funnel-bar" }, h("i", { style: `width:${Math.max(2, v / max * 100)}%` })), h("b", { class: "num" }, num(v)))));
+  }
+
+  function chip(text, kind) { return h("span", { class: "chip" + (kind ? " " + kind : "") }, text); }
+
+  function statusHero(x) {
+    const jobs = (x.job_ids || []).length;
+    return h("section", { class: "sec-hero" },
+      h("div", { class: "shield", "aria-hidden": "true" }, "✓"),
+      h("div", { class: "sec-hero-text" },
+        h("h2", null, "Secure channel established"),
+        h("p", null, "BB84 key exchange complete. Eavesdropping was not detected on your session key."),
+        h("div", { class: "chips" },
+          chip("No eavesdropping detected", "good"), chip("Error rate " + pct(x.qber, 1), "good"),
+          chip(x.source === "hardware" ? "Ran on " + x.backend : (SRC[x.source] || x.backend), x.source === "hardware" ? "ibm" : ""),
+          jobs ? chip("IBM job " + x.job_ids[0], "ibm") : null)));
+  }
+
+  function eveBanner(x) {
+    if (!x.eve_test || !x.eve_test.ran) return null;
+    const e = x.eve_test;
+    return h("div", { class: "note warn eve-note" }, h("b", null, e.detected ? "Eavesdropper test: detected. " : "Eavesdropper test ran. "),
+      `A simulated eavesdropper pushed the error rate to ${pct(e.qber, 1)} (abort limit ${pct(x.qber_limit, 0)}). That exchange was abandoned and its bits were discarded; a clean exchange then made this session's key.`);
+  }
+
+  function attemptCards(x) {
+    const attempts = x.attempts || [];
+    if (!attempts.length) return null;
+    return h("section", { class: "panel handshake-attempts" },
+      h("div", { class: "panel-heading" }, h("div", null,
+        h("h2", null, "Login handshake attempts"),
+        h("p", { class: "muted" }, "Each attempt is shown in order. Rejected keys are discarded; only the clean accepted attempt signs your session."))),
+      ...attempts.map((a) => {
+        const tr = a.trace || {};
+        const bits = (v) => (v || []).map((b) => String(b)).join("");
+        return h("article", { class: "attempt-row" },
+          h("div", { class: "panel-heading" },
+            h("b", null, "Attempt " + a.number + (a.eve ? " · Eve injected" : " · clean channel")),
+            chip(a.accepted ? "Accepted" : "Rejected · discarded", a.accepted ? "good" : "bad")),
+          h("p", { class: "muted" }, `${a.backend || a.source} · QBER ${pct(a.qber, 1)} · 95% upper bound ${pct(a.qber_upper95, 1)} · ${a.disposition}`),
+          gauge(a.qber, x.qber_limit, !a.accepted, "Attempt error rate"),
+          h("div", { class: "trace-grid" },
+            h("div", null, h("small", null, "Alice bits (first 24)"), h("code", null, bits(tr.alice_bits))),
+            h("div", null, h("small", null, "Alice bases"), h("code", null, bits(tr.alice_bases))),
+            h("div", null, h("small", null, "Bob bases"), h("code", null, bits(tr.bob_bases))),
+            h("div", null, h("small", null, "Kept positions"), h("code", null, (tr.kept_positions || []).join(", "))),
+            h("div", null, h("small", null, "Public sample · Alice"), h("code", null, bits(tr.sample_alice_bits))),
+            h("div", null, h("small", null, "Public sample · Bob"), h("code", null, bits(tr.sample_bob_bits)))),
+          h("small", { class: "muted" }, "Only the publicly compared sample bits are displayed; undisclosed secret key bits are never shown."));
+      }));
+  }
+
+  function copyBtn(text) {
+    const b = h("button", { class: "btn alt small", type: "button" }, "Copy");
+    b.addEventListener("click", async () => { try { await navigator.clipboard.writeText(text); b.textContent = "Copied"; } catch (e) { b.textContent = "Copy failed"; } setTimeout(() => { b.textContent = "Copy"; }, 1600); });
+    return b;
+  }
+
+  function authKeyCard(x) {
+    const a = x.auth_key;
+    return h("div", { class: "panel authkey" },
+      h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "Authentication key"), h("p", { class: "muted" }, "Made fresh from this sign-in's BB84 exchange")), chip(a.bits + "-bit", "good")),
+      h("div", { class: "keyprint", "aria-label": "Authentication key fingerprint" }, a.fingerprint),
+      h("div", { class: "keyprint-actions noprint" }, copyBtn(a.fingerprint), h("small", { class: "muted" }, "Fingerprint (public identifier of the key)")),
+      h("dl", { class: "kv" },
+        h("dt", null, "Session tag"), h("dd", { class: "mono" }, a.tag),
+        h("dt", null, "Session number"), h("dd", null, "#" + x.session_id),
+        h("dt", null, "Created"), h("dd", null, x.created + " UTC"),
+        h("dt", null, "Valid for"), h("dd", null, x.token_hours + " hours"),
+        h("dt", null, "Derived with"), h("dd", null, a.kdf),
+        h("dt", null, "Signed with"), h("dd", null, a.mac)),
+      h("p", { class: "muted", style: "margin:12px 0 0" }, "The key itself never leaves the server. Your login token carries a tag that only this key can produce, and every request is checked against it."));
+  }
+
+  function qberCard(x) {
+    return h("div", { class: "panel" },
+      h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "Eavesdropping check"), h("p", { class: "muted" }, "Errors in a public sample reveal anyone listening")), chip("Not detected", "good")),
+      gauge(x.qber, x.qber_limit, false, "Measured"),
+      h("dl", { class: "kv", style: "margin-top:14px" },
+        h("dt", null, "Measured error rate"), h("dd", null, pct(x.qber, 1)),
+        h("dt", null, "95% upper bound"), h("dd", null, pct(x.qber_upper95, 1) + " (must stay below " + pct(x.qber_limit, 0) + ")"),
+        h("dt", null, "Bits compared"), h("dd", null, num(x.sample_bits)),
+        h("dt", null, "Ran on"), h("dd", null, x.backend)),
+      h("div", { class: "funnel-title" }, "From qubits to key"), funnel(x));
+  }
+
+  // shown once, right after signing up or logging in
+  function viewWelcome() {
+    const x = S.welcome, go = (hash) => () => { S.welcome = null; location.hash = hash; route(); };
+    shell(h("div", { class: "welcome" },
+      statusHero(x), eveBanner(x), attemptCards(x),
+      x.fallback_note ? h("p", { class: "note warn" }, x.fallback_note) : null,
+      h("div", { class: "sec-grid" }, authKeyCard(x), qberCard(x)),
+      h("div", { class: "welcome-actions noprint" },
+        h("button", { class: "btn", type: "button", onclick: go("#/home") }, "Continue to QPortal"), " ",
+        h("button", { class: "btn alt", type: "button", onclick: go("#/security") }, "Open the Security centre"))), "security");
+  }
+
+  function testResult(r) {
+    const det = r.eavesdropping_detected;
+    return h("div", { class: "test-result" },
+      h("div", { class: "note" + (det ? " warn" : "") }, h("b", null, det ? "Eavesdropper detected. " : (r.status === "SECURE_KEY_ESTABLISHED" ? "No eavesdropping detected. " : "Not enough clean bits. ")),
+        det ? `The error rate of ${pct(r.qber, 1)} is far above the ${pct(r.qber_limit, 0)} limit, so the key was thrown away.` : `The error rate of ${pct(r.qber, 1)} is below the ${pct(r.qber_limit, 0)} limit.`),
+      gauge(r.qber, r.qber_limit, det, det ? "With eavesdropper" : "Clean line"),
+      h("dl", { class: "kv", style: "margin-top:12px" },
+        h("dt", null, "Eavesdropper on the line"), h("dd", null, r.eve_present ? "Yes (simulated)" : "No"),
+        h("dt", null, "95% upper bound"), h("dd", null, pct(r.qber_upper95, 1)),
+        h("dt", null, "Key"), h("dd", null, r.key_discarded ? "Discarded (test only, nothing stored)" : "Not stored (test only)"),
+        h("dt", null, "Ran on"), h("dd", null, r.backend + ((r.job_ids || []).length ? " · job " + r.job_ids[0] : ""))),
+      r.fallback_note ? h("p", { class: "note warn" }, r.fallback_note) : null);
+  }
+
+  function testPanel(st) {
+    const out = h("div", { class: "test-out", "aria-live": "polite" });
+    let useIbm = st.ibm.configured && st.ibm.login_target !== "simulator";
+    const btns = [];
+    const run = (eve) => async (e) => {
+      const me = e.currentTarget;
+      btns.forEach((b) => { b.disabled = true; });
+      out.replaceChildren(h("p", { class: "muted" }, useIbm ? "Running on IBM. This can take a few minutes…" : "Running BB84…"));
+      try { out.replaceChildren(testResult(await api("/api/security/handshake-test", { method: "POST", body: Object.assign({ eve }, st.ibm.configured ? { use_ibm: useIbm } : {}) }))); }
+      catch (ex) { out.replaceChildren(h("p", { class: "error" }, ex.message)); }
+      btns.forEach((b) => { b.disabled = false; }); me.focus();
+    };
+    const clean = h("button", { class: "btn alt", type: "button", onclick: run(false) }, "Run a clean exchange");
+    const attack = h("button", { class: "btn", type: "button", onclick: run(true) }, "Simulate an eavesdropper");
+    btns.push(clean, attack);
+    return h("div", { class: "panel" },
+      h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "Eavesdropping test"), h("p", { class: "muted" }, "Off by default. Try it to see BB84 catch a listener."))),
+      h("p", null, "An eavesdropper who measures the qubits in transit disturbs them, which shows up as about 25% errors in the public sample. Run both and compare. Nothing here changes your session or stores a key."),
+      st.ibm.configured ? h("label", { class: "opt" }, h("input", { type: "checkbox", checked: useIbm, onchange: (e) => { useIbm = e.target.checked; } }), h("span", null, "Run on a real IBM quantum computer (can take a few minutes, falls back to the simulator)")) : null,
+      h("div", { class: "noprint test-actions" }, clean, " ", attack), out);
+  }
+
+  function ibmCard(st, x) {
+    const out = h("div", { class: "ibm-out", "aria-live": "polite" });
+    const btn = h("button", { class: "btn alt small", type: "button" }, "Check IBM connection");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true; out.replaceChildren(h("p", { class: "muted" }, "Contacting IBM Quantum…"));
+      try {
+        const r = await api("/api/security/ibm-check", { method: "POST" });
+        out.replaceChildren(h("dl", { class: "kv", style: "margin-top:12px" },
+          h("dt", null, "Connection"), h("dd", null, r.connected ? "Connected" : "Not connected"),
+          r.connected ? [h("dt", null, "Machine"), h("dd", null, `${r.backend} (${r.qubits} qubits)`), h("dt", null, "Status"), h("dd", null, r.operational ? "Operational" : "Not accepting jobs"), h("dt", null, "Jobs waiting"), h("dd", null, num(r.pending_jobs))] : null,
+          h("dt", null, "Note"), h("dd", null, r.message)));
+      } catch (ex) { out.replaceChildren(h("p", { class: "error" }, ex.message)); }
+      btn.disabled = false;
+    });
+    const hw = x && x.source === "hardware";
+    return h("div", { class: "panel" },
+      h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "IBM Quantum"), h("p", { class: "muted" }, "Where the key exchange can run")), chip(st.ibm.configured ? "Token configured" : "Not configured", st.ibm.configured ? "ibm" : "")),
+      h("dl", { class: "kv" },
+        h("dt", null, "Preferred machine"), h("dd", null, st.ibm.preferred_backend),
+        h("dt", null, "Saved-result keys use"), h("dd", null, st.ibm.key_target === "hardware" ? "IBM hardware" : "Simulator"),
+        h("dt", null, "This session ran on"), h("dd", null, x ? (hw ? x.backend : (SRC[x.source] || x.backend)) : "—"),
+        h("dt", null, "IBM job"), h("dd", { class: "mono" }, x && (x.job_ids || []).length ? x.job_ids[0] : (hw ? "—" : "None (not run on IBM)"))),
+      st.ibm.configured ? null : h("p", { class: "muted", style: "margin-top:10px" }, "Add IBM_QUANTUM_TOKEN to the server's .env to let logins and tests run on a real quantum processor."),
+      h("div", { class: "noprint", style: "margin-top:12px" }, btn), out);
+  }
+
+  function historyTable(rows) {
+    if (!rows.length) return null;
+    return h("div", { class: "panel" }, h("h2", null, "Recent handshakes"),
+      h("div", { class: "sec-table-wrap" }, h("table", { class: "sec-table" },
+        h("thead", null, h("tr", null, ["When (UTC)", "Event", "Ran on", "Error rate", "Eavesdropper test", "Key fingerprint"].map((t) => h("th", { scope: "col" }, t)))),
+        h("tbody", null, rows.map((r) => h("tr", null,
+          h("td", null, r.created), h("td", null, r.event === "signup" ? "Sign-up" : "Log-in"), h("td", null, r.backend || SRC[r.source]),
+          h("td", { class: "num" }, pct(r.qber, 1)), h("td", null, r.eve_tested ? (r.eve_detected ? "Detected" : "Ran, not detected") : "Off"),
+          h("td", { class: "mono" }, r.fingerprint.slice(0, 14) + "…")))))));
+  }
+
+  function viewLiveSecurity() {
+    const download = h("button", { class: "btn alt", type: "button", onclick: async e => {
+      const b=e.currentTarget; b.disabled=true;
+      try {
+        const r=await fetch("/api/bb84/audit.csv",{headers:{Authorization:"Bearer "+S.token}});
+        if(!r.ok) throw new Error("Could not download audit CSV.");
+        const url=URL.createObjectURL(await r.blob()); const a=document.createElement("a"); a.href=url; a.download="bb84_live_audit.csv"; a.click(); URL.revokeObjectURL(url);
+      } catch(ex) { alert(ex.message); } finally { b.disabled=false; }
+    } }, "Download my BB84 audit CSV");
+    shell(h("div", null,
+      h("div", { class: "pagehead" }, h("h1", null, "Live BB84 sign-in"),
+        h("p", null, "The browser and portal completed a one-time BB84-derived HMAC proof at sign-in. The key is not used to sign every subsequent request.")),
+      h("div", { class: "panel" }, h("h2", null, "Honest protocol note"),
+        h("p", null, "Qubits are simulated in this demo. Alice is the portal; Bob is this browser. Eve can intercept and resend the simulated states. The sample test, key derivation and login proof are implemented, but there is no quantum channel to your device."),
+        h("p", null, "The browser keeps the derived key in memory only. The portal receives a one-time HMAC proof, not the key or undisclosed measurement bits."),
+        download)), "security");
+  }
+
   async function viewSecurity() {
     shell(h("p", { class: "boot" }, "Loading…"), "security");
     let st; try { st = await api("/api/security/status"); } catch (ex) { return; }
-    const out = h("div"), k = st.key;
-    const act = (path, label) => h("button", { class: "btn alt", onclick: async (e) => {
-      e.target.disabled = true; out.replaceChildren(h("p", { class: "muted" }, "Running quantum circuits…"));
+    const out = h("div"), k = st.key, x = st.session && st.session.session_id ? st.session : null;
+    const rotate = h("button", { class: "btn alt", type: "button", onclick: async (e) => {
+      const b = e.currentTarget; b.disabled = true; out.replaceChildren(h("p", { class: "muted" }, "Running quantum circuits…"));
+      try { await api("/api/security/rotate", { method: "POST" }); viewSecurity(); } catch (ex) { out.replaceChildren(h("p", { class: "error" }, ex.message)); b.disabled = false; }
+    } }, "Use a fresh key for new results");
+    const download = h("button", { class: "btn alt", type: "button", style: "margin-left:8px", onclick: async (e) => {
+      const b = e.currentTarget; b.disabled = true;
       try {
-        const r = await api(path, { method: "POST" });
-        if (path.includes("rotate")) { viewSecurity(); return; }
-        out.replaceChildren(h("div", { class: r.status === "ABORTED" ? "note warn" : "note" }, h("b", null, r.status === "ABORTED" ? "Eavesdropper detected. " : "Secure. "),
-          `Error rate ${pct(r.qber, 0)} across ${r.raw_qubits} qubits. ${r.reason || ""} Keys are only kept when the error rate stays below ${pct(st.qber_limit, 0)}.`));
-      } catch (ex) { out.replaceChildren(h("p", { class: "error" }, ex.message)); }
-      e.target.disabled = false; } }, label);
+        const r = await fetch(S.health && S.health.login_mode === "live" ? "/api/bb84/audit.csv" : "/api/security/audit.csv", { headers: { Authorization: "Bearer " + S.token } });
+        if (!r.ok) throw new Error("Could not download audit CSV.");
+        const url = URL.createObjectURL(await r.blob()); const a = document.createElement("a"); a.href = url; a.download = "bb84_audit.csv"; a.click(); URL.revokeObjectURL(url);
+      } catch (ex) { alert(ex.message); } finally { b.disabled = false; }
+    } }, "Download BB84 audit CSV");
     shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "Security"),
-      h("p", null, "Your saved results are locked with a key that starts life in quantum circuits. Here is what that means and what it does not.")),
-      h("div", { class: "panel" }, h("h2", null, "Your key"),
+      h("p", null, "Your session and your saved results are protected by keys made with BB84 quantum key exchange. Here is the key on offer, whether anyone was listening, and where the quantum part ran.")),
+      x ? [statusHero(x), eveBanner(x), x.fallback_note ? h("p", { class: "note warn" }, x.fallback_note) : null, h("div", { class: "sec-grid" }, authKeyCard(x), qberCard(x))]
+        : h("p", { class: "note warn" }, "This session has no handshake record. Log out and back in to run one."),
+      h("div", { class: "sec-grid" }, ibmCard(st, x), testPanel(st)),
+      historyTable(st.history || []),
+      h("div", { class: "panel" }, h("h2", null, "Saved-results key"),
         k ? h("dl", { class: "kv" }, h("dt", null, "Key number"), h("dd", null, "#" + k.id), h("dt", null, "Created"), h("dd", null, k.created + " UTC"),
           h("dt", null, "Made on"), h("dd", null, k.backend), h("dt", null, "Quantum circuits run"), h("dd", null, `${k.sessions} sessions, ${k.raw_qubits} qubits`),
           h("dt", null, "Secret bits kept"), h("dd", null, `${k.secret_bits} (at least ${st.min_secret_bits} required)`), h("dt", null, "Measured error rate"), h("dd", null, pct(k.qber, 1)),
           h("dt", null, "Results saved with it"), h("dd", null, st.encrypted_runs)) : h("p", null, "No key yet. One is created with your next saved result."),
         h("p", { class: "muted", style: "margin-top:12px" }, `Fresh keys ready in the bank: ${st.bank_ready}.`),
-        h("div", { class: "noprint" }, act("/api/security/rotate", "Use a fresh key for new results"), " ", act("/api/security/attack-check", "Test that tampering is detected")), out),
+        h("div", { class: "noprint", style: "margin-top:12px" }, rotate, download), out),
       h("div", { class: "panel" }, h("h2", null, "What this protects"),
-        h("p", null, "The key comes from BB84, a method where any eavesdropper disturbs the quantum states and shows up as extra errors. We pool many runs until there are at least 256 secret bits, check that the error rate is safely low, and condense them into one 256-bit key. Each user's key is then mixed with a secret held only by this server."),
-        h("p", null, "Your results are stored encrypted (AES-256) with that key. If someone copied the database, they would see unreadable data."),
-        h("p", { class: "note warn" }, "Honest limit: the quantum circuits run on the server, so this is not a quantum link between your device and ours. Normal HTTPS still protects data in transit. The quantum part adds quantum-made randomness and a tamper check to the key, and the server secret means the final key is never weaker than standard practice."))), "security");
+        h("p", null, "BB84 is a method where any eavesdropper disturbs the quantum states and shows up as extra errors. At each sign-in we send hundreds of qubits, keep the ones where both sides measured the same way, compare a random sample in public, and refuse the key if the error rate is not safely low. The remaining bits are condensed into a 256-bit authentication key that your login token must prove it holds."),
+        h("p", null, "Your saved results are stored encrypted (AES-256) with a separate BB84-based key. If someone copied the database, they would see unreadable data."),
+        h("p", { class: "note warn" }, "Honest limit: the quantum circuits run on the server, so this is not a quantum link between your device and ours. Normal HTTPS still protects data in transit. The quantum part adds quantum-made randomness and a tamper check to the keys, and the server secret in the derivation means they are never weaker than standard practice."))), "security");
   }
 
   // ---------- router ----------
@@ -1163,6 +1552,8 @@
     if (!S.health) { try { S.health = await (await fetch("/api/health")).json(); } catch (e) { S.health = { synthetic: false, max_shortlist: 12, min_shortlist: 3 }; } }
     const [, page, arg] = (location.hash || "#/").split("/");
     if (!S.token) { viewLogin(); return; }
+    if (page === "welcome") { if (S.welcome) return viewWelcome(); location.hash = "#/home"; return; }
+    S.welcome = null;
     if (page === "login") { location.hash = "#/home"; return; }
     if (page === "home" || !page) return viewHome();
     if (page === "choose") return viewChoose();

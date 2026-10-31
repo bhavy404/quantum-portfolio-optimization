@@ -5,20 +5,47 @@ Run from the repository root:  uvicorn portal.main:app --port 8000
 import threading
 import time
 import csv
+import hashlib
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from . import qkd_live
 from . import analytics as an
-from . import auth, config, db, jobs, keybank, prices, progress, universe
+from . import auth, config, db, jobs, keybank, loginkey, prices, progress, universe
 
 STATIC = Path(__file__).resolve().parent / "static"
-app = FastAPI(title="QPortal", version="2.0")
+app = FastAPI(title="QPortal", version="2.1")
+
+# Per-process sliding-window limiter. For multi-worker deployments, move this to Redis.
+_RATE_LOCK = threading.Lock()
+_RATE_BUCKETS = {}
+_RATE_LIMITS = {"signup": (40, 5, 900), "login": (60, 10, 900)}
+
+
+def _rate_limit(request: Request, action: str, identity: str):
+    ip_limit, identity_limit, window = _RATE_LIMITS[action]
+    now = time.time()
+    client = request.client.host if request.client else "unknown"
+    keys = [(action, client, "*", ip_limit), (action, client, identity.strip().lower()[:160], identity_limit)]
+    with _RATE_LOCK:
+        for key_action, host, ident, limit in keys:
+            key = (key_action, host, ident)
+            hits = [stamp for stamp in _RATE_BUCKETS.get(key, []) if now - stamp < window]
+            if len(hits) >= limit:
+                retry = max(1, int(window - (now - hits[0])))
+                raise HTTPException(429, f"Too many {action} attempts. Try again in {retry} seconds.",
+                                    headers={"Retry-After": str(retry)})
+        for key_action, host, ident, limit in keys:
+            key = (key_action, host, ident)
+            hits = [stamp for stamp in _RATE_BUCKETS.get(key, []) if now - stamp < window]
+            hits.append(now)
+            _RATE_BUCKETS[key] = hits
 
 
 @app.exception_handler(Exception)
@@ -38,7 +65,7 @@ def _startup():
     db.execute("UPDATE runs SET status='failed', error=? WHERE status='running'", ("The server restarted before this analysis finished. Please run it again.",))
     universe.seed_core()
     universe.refresh_from_nse_async()
-    keybank.top_up_async()
+    keybank.top_up_async(target=config.BANK_TARGET)
 
     def warm():
         while True:
@@ -56,18 +83,51 @@ class Signup(BaseModel):
     email: str
     password: str
     name: str = ""
+    eve_test: bool = False   # optional demo: simulate an eavesdropper during the key exchange (always detected)
+    use_ibm: Optional[bool] = False  # hardware is opt-in; simulator is the default
+    session_id: Optional[str] = None
+    proof: Optional[str] = None
 
 
 class Login(BaseModel):
     email: str
     password: str
+    eve_test: bool = False
+    use_ibm: Optional[bool] = False
+    session_id: Optional[str] = None
+    proof: Optional[str] = None
+
+
+class HandshakeTest(BaseModel):
+    eve: bool = False
+    use_ibm: Optional[bool] = None
+
+
+class BB84Start(BaseModel):
+    eve_on: bool = False
+    attempt: int = Field(default=1, ge=1, le=3)
+    account: str = ""
+    group_id: str = ""
+
+
+class BB84Sift(BaseModel):
+    session_id: str
+    bob_bases: List[int]
+    account: str = ""
+
+
+class BB84Sample(BaseModel):
+    session_id: str
+    bob_sample_bits: List[int]
+    account: str = ""
 
 
 class Recommend(BaseModel):
     symbols: List[str] = []
-    mode: str = "basket"  # "basket" = pick from the shortlist; "sector" = quantum pick inside chosen sectors
+    mode: str = "basket"  # "basket" = pick from the shortlist; "sector" = QAOA mix + stock pick
     sectors: List[str] = []
     sector_weights: dict = {}
+    sector_k: int = Field(default=4, ge=2, le=5)
     k: int = Field(ge=1, le=11)
     q: float = Field(ge=0.0, le=1.0)
     amount: float = Field(default=100000, ge=1000, le=1e9)
@@ -86,10 +146,12 @@ class Recommend(BaseModel):
     def _check_mode(self):
         if self.mode == "sector":
             self.sectors = list(dict.fromkeys(s.strip() for s in self.sectors if s and s.strip()))
-            if not (2 <= len(self.sectors) <= 5):
-                raise ValueError("Choose between 2 and 5 sectors.")
-            if self.k < len(self.sectors):
-                raise ValueError("Hold at least one stock per sector you chose.")
+            if not (2 <= len(self.sectors) <= 12):
+                raise ValueError("Choose between 2 and 12 sectors as QAOA mix candidates.")
+            if self.sector_k > len(self.sectors):
+                self.sector_k = len(self.sectors)
+            if self.k < self.sector_k:
+                raise ValueError("Hold at least as many stocks as sectors QAOA should keep.")
             self.sector_weights = {str(a): float(b) for a, b in (self.sector_weights or {}).items() if str(a) in self.sectors}
         elif self.mode == "basket":
             if not (config.MIN_SHORTLIST <= len(self.symbols) <= config.MAX_SHORTLIST):
@@ -116,29 +178,134 @@ class Recommend(BaseModel):
 # ----- public ------------------------------------------------------------------------------------
 @app.get("/api/health")
 def health():
-    return {"ok": True, "synthetic": config.SYNTHETIC, "ibm_configured": bool(config.IBM_TOKEN),
-            "key_source": config.KEY_TARGET, "prices_updated": prices.last_updated(),
+    return {"ok": True, "synthetic": config.SYNTHETIC, "login_mode": config.LOGIN_MODE, "synthetic_qubits": config.LOGIN_MODE == "live", "ibm_configured": bool(config.IBM_TOKEN),
+            "key_source": config.KEY_TARGET, "login_target": config.LOGIN_TARGET, "prices_updated": prices.last_updated(),
             "stocks_listed": db.one("SELECT count(*) AS c FROM stocks")["c"],
             "max_shortlist": config.MAX_SHORTLIST, "min_shortlist": config.MIN_SHORTLIST}
 
 
-@app.post("/api/auth/register")
-def register(body: Signup):
-    user = auth.register(body.email, body.password, body.name)
+def _want_ibm(requested) -> bool:
+    """IBM is never selected implicitly; the caller must explicitly opt in."""
+    return bool(requested) and bool(config.IBM_TOKEN)
+
+
+def _secure_session(user: dict, event: str, eve_test: bool, use_ibm: bool) -> dict:
+    use_ibm = _want_ibm(use_ibm)
     try:
-        keybank.assign_key(user["id"])
-    except Exception as exc:  # signup must not fail because of the key step; it is retried at first save
-        import traceback
-        traceback.print_exc()
-        print(f"[register] key assignment deferred: {exc}")
+        security, atag = loginkey.establish(user["id"], event, eve_test, use_ibm)
+    except RuntimeError as exc:
+        raise HTTPException(503, str(exc))
+    return {"token": auth.make_token(user, security["session_id"], atag),
+            "user": {"id": user["id"], "email": user["email"], "name": user["name"]},
+            "security": security}
+
+
+@app.post("/api/bb84/start")
+def bb84_start(body: BB84Start):
+    if config.LOGIN_MODE != "live":
+        raise HTTPException(404, "Live BB84 is disabled. Set QPORTAL_LOGIN_MODE=live.")
+    try:
+        return qkd_live.start(body.eve_on, body.attempt, body.account, body.group_id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/bb84/sift")
+def bb84_sift(body: BB84Sift):
+    if config.LOGIN_MODE != "live":
+        raise HTTPException(404, "Live BB84 is disabled. Set QPORTAL_LOGIN_MODE=live.")
+    try:
+        return qkd_live.sift(body.session_id, body.bob_bases, body.account)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.post("/api/bb84/sample")
+def bb84_sample(body: BB84Sample):
+    if config.LOGIN_MODE != "live":
+        raise HTTPException(404, "Live BB84 is disabled. Set QPORTAL_LOGIN_MODE=live.")
+    try:
+        return qkd_live.sample(body.session_id, body.bob_sample_bits, body.account)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+
+
+@app.get("/api/bb84/audit.csv")
+def bb84_live_audit_csv(user=Depends(auth.current_user)):
+    if config.LOGIN_MODE != "live":
+        raise HTTPException(404, "Live BB84 is disabled.")
+    import io
+    from fastapi.responses import StreamingResponse
+    rows = qkd_live.audit_rows(20000, user["email"])
+    buf = io.StringIO()
+    fields = ["account", "event_time", "mode", "qubits", "sifted_bits", "sample_size", "error_rate",
+              "upper_bound", "eve_on", "verdict", "attempt_number", "latency_ms"]
+    writer = csv.DictWriter(buf, fieldnames=fields)
+    writer.writeheader(); writer.writerows(rows)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=bb84_live_audit.csv"})
+
+
+def _live_session(user: dict, body, mode: str) -> dict:
+    if not body.session_id or not body.proof:
+        raise HTTPException(401, "Complete the live BB84 exchange before signing in.")
+    try:
+        live_key = qkd_live.verify_and_consume(body.session_id, body.email, mode, body.proof)
+    except ValueError as exc:
+        raise HTTPException(401, str(exc))
+    # In live mode the proof is checked once here; subsequent API calls use the
+    # ordinary signed application token and do not sign every request with BB84.
+    return {"token": auth.make_live_token(user),
+            "user": {"id": user["id"], "email": user["email"], "name": user["name"]},
+            "security": {"mode": "live", "status": "SECURE_KEY_ESTABLISHED",
+                         "fingerprint": qkd_live.fingerprint(live_key),
+                         "note": "Qubits are simulated in this demo."}}
+
+
+@app.post("/api/auth/register")
+def register(body: Signup, request: Request):
+    _rate_limit(request, "signup", body.email)
+    if config.LOGIN_MODE == "live":
+        # Validate and consume the browser's one-time BB84 proof before creating the account.
+        try:
+            live_key = qkd_live.verify_and_consume(body.session_id or "", body.email, "signup", body.proof or "")
+        except ValueError as exc:
+            raise HTTPException(401, str(exc))
+        user = auth.register(body.email, body.password, body.name)
+        keybank.top_up_async(target=config.BANK_TARGET)
+        return {"token": auth.make_live_token(user), "user": user,
+                "security": {"mode": "live", "status": "SECURE_KEY_ESTABLISHED",
+                             "fingerprint": qkd_live.fingerprint(live_key),
+                             "note": "Qubits are simulated in this demo."}}
+    user = auth.register(body.email, body.password, body.name)
+    keybank.top_up_async(target=config.BANK_TARGET)
     full = db.one("SELECT id,email,name FROM users WHERE id=?", (user["id"],))
-    return {"token": auth.make_token(full), "user": full}
+    return _secure_session(full, "signup", body.eve_test, body.use_ibm)
 
 
 @app.post("/api/auth/login")
-def login(body: Login):
-    row = auth.login(body.email, body.password)
-    return {"token": auth.make_token(row), "user": {"id": row["id"], "email": row["email"], "name": row["name"]}}
+def login(body: Login, request: Request):
+    _rate_limit(request, "login", body.email)
+    try:
+        row = auth.login(body.email, body.password)
+    except HTTPException:
+        db.execute(
+            "INSERT INTO login_audit(account,event,backend,secret_bits,error_rate,eve_tested,eve_detected,latency_ms,outcome) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (body.email.strip().lower(), "login", "not-run", 0, None, int(body.eve_test), 0, 0, "rejected_credentials"))
+        raise
+    if config.LOGIN_MODE == "live":
+        return _live_session(row, body, "login")
+    return _secure_session(row, "login", body.eve_test, body.use_ibm)
+
+
+@app.post("/api/auth/logout")
+def logout(user=Depends(auth.current_user)):
+    if user.get("live_sid"):
+        db.execute("UPDATE live_auth_sessions SET revoked=1 WHERE id=? AND user_id=?", (user["live_sid"], user["id"]))
+    if user.get("sid"):
+        db.execute("UPDATE login_sessions SET revoked=1 WHERE id=? AND user_id=?", (user["sid"], user["id"]))
+    return {"ok": True, "revoked": True}
 
 
 # ----- signed-in -----------------------------------------------------------------------------------
@@ -601,7 +768,107 @@ def delete_run(run_id: int, user=Depends(auth.current_user)):
 
 @app.get("/api/security/status")
 def security_status(user=Depends(auth.current_user)):
-    return keybank.status_for(user["id"])
+    status = keybank.status_for(user["id"])
+    if not status.get("key"):
+        try:
+            keybank.assign_key(user["id"])
+            status = keybank.status_for(user["id"])
+        except Exception:
+            pass
+
+    sess = loginkey.current(user.get("sid"), user["id"])
+    hist = loginkey.history(user["id"])
+
+    # If classic session is missing, enrich with live BB84 audit records
+    if not sess:
+        live_row = db.one(
+            "SELECT * FROM bb84_live_audit WHERE account=? ORDER BY id DESC LIMIT 1",
+            (user["email"],)
+        )
+        if live_row:
+            sess_id = live_row["session_id"]
+            sess = {
+                "session_id": sess_id[:12],
+                "created": live_row["event_time"],
+                "status": "SECURE_KEY_ESTABLISHED" if live_row["verdict"] == "secure" else "EAVESDROPPER_DETECTED",
+                "backend": "Web Crypto BB84 (Live browser/server)",
+                "source": "live",
+                "sessions": 1,
+                "raw_qubits": live_row["qubits"],
+                "sifted_bits": live_row["sifted_bits"],
+                "sample_bits": live_row["sample_size"],
+                "secret_bits": max(0, live_row["sifted_bits"] - live_row["sample_size"]),
+                "qber": live_row["error_rate"],
+                "qber_upper95": live_row["upper_bound"],
+                "qber_limit": 0.11,
+                "eve_test": {
+                    "ran": bool(live_row["eve_on"]),
+                    "detected": live_row["verdict"] == "eavesdropper_detected",
+                    "qber": live_row["error_rate"]
+                },
+                "attempts": [],
+                "fallback_note": None,
+                "latency_ms": live_row["latency_ms"],
+                "token_hours": 12,
+                "job_ids": [],
+                "auth_key": {
+                    "fingerprint": loginkey._group(hashlib.sha256(b"live|" + sess_id.encode()).hexdigest()[:32]),
+                    "tag": sess_id[:16].upper(),
+                    "bits": 256,
+                    "kdf": "HKDF-SHA256 (Web Crypto in browser + server Alice)",
+                    "mac": "HMAC-SHA256 one-time proof"
+                }
+            }
+
+    if not hist:
+        live_rows = db.query(
+            "SELECT id, event_time AS created, 'live' AS source, 'Web Crypto (Live)' AS backend, "
+            "event_time, 'login' AS event, error_rate AS qber, (sifted_bits - sample_size) AS secret_bits, "
+            "eve_on AS eve_tested, (verdict = 'eavesdropper_detected') AS eve_detected, "
+            "session_id, 0 AS revoked, latency_ms "
+            "FROM bb84_live_audit WHERE account=? ORDER BY id DESC LIMIT 8",
+            (user["email"],)
+        )
+        hist = [{
+            **dict(r),
+            "fingerprint": loginkey._group(hashlib.sha256(b"live|" + r["session_id"].encode()).hexdigest()[:32]),
+            "eve_tested": bool(r["eve_tested"]),
+            "eve_detected": bool(r["eve_detected"])
+        } for r in live_rows]
+
+    return {**status, "session": sess, "history": hist,
+            "ibm": {"configured": bool(config.IBM_TOKEN), "preferred_backend": config.IBM_BACKEND,
+                    "key_target": config.BANK_TARGET, "login_target": config.LOGIN_TARGET}}
+
+
+@app.post("/api/security/handshake-test")
+def handshake_test(body: HandshakeTest, user=Depends(auth.current_user)):
+    """Run a BB84 exchange on demand, with or without a simulated eavesdropper. Nothing is stored and no key is made."""
+    return loginkey.test_exchange(body.eve, _want_ibm(body.use_ibm))
+
+
+@app.post("/api/security/ibm-check")
+def ibm_check(user=Depends(auth.current_user)):
+    return loginkey.ibm_check()
+
+
+@app.get("/api/security/audit.csv")
+def security_audit_csv(user=Depends(auth.current_user)):
+    rows = db.query(
+        "SELECT account,event_time AS time,event,backend,job_id,secret_bits,error_rate,eve_tested,eve_detected,latency_ms,outcome "
+        "FROM login_audit WHERE account=(SELECT email FROM users WHERE id=?) ORDER BY id DESC LIMIT 5000",
+        (user["id"],)
+    )
+    import io
+    from fastapi.responses import StreamingResponse
+    buf = io.StringIO()
+    fields = ["account", "time", "event", "backend", "job_id", "secret_bits", "error_rate",
+              "eve_tested", "eve_detected", "latency_ms", "outcome"]
+    writer = csv.DictWriter(buf, fieldnames=fields)
+    writer.writeheader()
+    writer.writerows(rows)
+    return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv",
+                             headers={"Content-Disposition": "attachment; filename=qportal_bb84_audit.csv"})
 
 
 @app.post("/api/security/rotate")
@@ -612,7 +879,7 @@ def rotate(user=Depends(auth.current_user)):
 
 @app.post("/api/security/attack-check")
 def attack_check(user=Depends(auth.current_user)):
-    """Run BB84 with an eavesdropper on the line to show that tampering is detected. Nothing is stored."""
+    """Kept for older clients: BB84 with an eavesdropper on the line. Nothing is stored."""
     return keybank.generate_key(target="simulator", enable_eve=True)
 
 

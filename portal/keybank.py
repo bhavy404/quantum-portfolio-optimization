@@ -19,12 +19,30 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from . import db
 from . import qlock
-from .config import BANK_TARGET_KEYS, IBM_BACKEND, IBM_TOKEN, KEY_MIN_SECRET_BITS, KEY_TARGET, SERVER_SECRET
+from .config import BANK_TARGET_KEYS, BANK_TARGET, IBM_BACKEND, IBM_TOKEN, KEY_MIN_SECRET_BITS, KEY_TARGET, SERVER_SECRET
 
 QBER_LIMIT = 0.11
 SESSION_QUBITS = 64
 MAX_SESSIONS = 60
 _bank_lock = threading.Lock()
+
+
+def _seal_material(material: bytes) -> str:
+    digest = hashes.Hash(hashes.SHA256())
+    digest.update(SERVER_SECRET + b"|qportal-keybank-storage")
+    key = digest.finalize()
+    nonce = secrets.token_bytes(12)
+    return "enc1:" + (nonce + AESGCM(key).encrypt(nonce, material, b"qportal-keybank")).hex()
+
+
+def _open_material(value: str) -> bytes:
+    if not value.startswith("enc1:"):
+        # Legacy rows remain readable; every newly generated key is encrypted at rest.
+        return bytes.fromhex(value)
+    packed = bytes.fromhex(value[5:])
+    digest = hashes.Hash(hashes.SHA256())
+    digest.update(SERVER_SECRET + b"|qportal-keybank-storage")
+    return AESGCM(digest.finalize()).decrypt(packed[:12], packed[12:], b"qportal-keybank")
 
 
 def _pack(bits):
@@ -89,7 +107,7 @@ def _generate_key(target: str = None, enable_eve: bool = False) -> dict:
         summary["key_id"] = db.execute(
             "INSERT INTO keys(source,backend,sessions,raw_qubits,sifted_bits,secret_bits,qber,job_ids,material_hex) "
             "VALUES (?,?,?,?,?,?,?,?,?)",
-            (target, summary["backend"], sessions, raw, sifted_total, len(secret), qber, json.dumps(job_ids[:5]), material.hex()),
+            (target, summary["backend"], sessions, raw, sifted_total, len(secret), qber, json.dumps(job_ids[:5]), _seal_material(material)),
         )
     return summary
 
@@ -120,7 +138,7 @@ def make_key_batched(execute=None) -> dict:
         summary["key_id"] = db.execute(
             "INSERT INTO keys(source,backend,sessions,raw_qubits,sifted_bits,secret_bits,qber,job_ids,material_hex) VALUES (?,?,?,?,?,?,?,?,?)",
             (stored_source, summary["backend"], out["sessions"], out["raw_qubits"], out["sifted_bits"], len(secret), qber,
-             json.dumps(summary["job_ids"]), material.hex()),
+             json.dumps(summary["job_ids"]), _seal_material(material)),
         )
     return summary
 
@@ -136,18 +154,20 @@ def key_summary(key_id: int) -> dict:
 
 
 def unassigned_count() -> int:
-    row = db.one("SELECT count(*) AS c FROM keys WHERE source NOT LIKE '%-result' AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL)")
+    row = db.one("SELECT count(*) AS c FROM keys WHERE source NOT LIKE '%-result' "
+                 "AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL) "
+                 "AND id NOT IN (SELECT key_id FROM login_key_uses)")
     return int(row["c"])
 
 
-def top_up_async():
+def top_up_async(target: str = None):
     """Keep a small stock of fresh keys ready so logins never wait for a quantum job."""
     def run():
         if not _bank_lock.acquire(blocking=False):
             return
         try:
             while unassigned_count() < BANK_TARGET_KEYS:
-                if generate_key()["status"] != "SECURE_KEY_ESTABLISHED":
+                if generate_key(target=target or BANK_TARGET)["status"] != "SECURE_KEY_ESTABLISHED":
                     break
         except Exception as exc:
             print(f"[keybank] top-up failed: {exc}")
@@ -160,7 +180,9 @@ def top_up_async():
 def assign_key(user_id: int) -> int:
     """Give the user the oldest unused key (or make one now)."""
     with _bank_lock:
-        row = db.one("SELECT id FROM keys WHERE source NOT LIKE '%-result' AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL) ORDER BY id LIMIT 1")
+        row = db.one("SELECT id FROM keys WHERE source NOT LIKE '%-result' "
+                     "AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL) "
+                     "AND id NOT IN (SELECT key_id FROM login_key_uses) ORDER BY id LIMIT 1")
         key_id = row["id"] if row else generate_key().get("key_id")
         if not key_id:
             raise RuntimeError("Could not create a secure key right now. Please try again.")
@@ -169,11 +191,44 @@ def assign_key(user_id: int) -> int:
     return key_id
 
 
+def claim_login_key(user_id: int) -> tuple[int, bytes]:
+    """Atomically consume a pre-generated key; replenish from simulator if the pool is empty."""
+    with db.tx() as c:
+        row = c.execute(
+            "SELECT id,material_hex FROM keys WHERE source NOT LIKE '%-result' "
+            "AND id NOT IN (SELECT key_id FROM login_key_uses) "
+            "AND id NOT IN (SELECT key_id FROM users WHERE key_id IS NOT NULL) ORDER BY id LIMIT 1"
+        ).fetchone()
+        if row:
+            key_id, stored = int(row["id"]), row["material_hex"]
+            c.execute("INSERT INTO login_key_uses(key_id,user_id) VALUES (?,?)", (key_id, user_id))
+            material = _open_material(stored)
+            derived = HKDF(algorithm=hashes.SHA256(), length=32, salt=SERVER_SECRET,
+                           info=f"qportal-login-pool:{user_id}:{key_id}".encode()).derive(material)
+            return key_id, derived
+    # Pure-Python protocol model keeps authentication available when Qiskit/Aer is not installed.
+    from . import bb84_batch
+    out = bb84_batch.run_model(sessions=10, n=100, eve=False)
+    errors, sample = out["errors"], out["sample_bits"]
+    qber = errors / sample if sample else 1.0
+    if len(out["secret"]) < KEY_MIN_SECRET_BITS or _upper95(errors, sample) > QBER_LIMIT:
+        raise RuntimeError("The BB84 key pool is temporarily empty. Please retry.")
+    material = HKDF(algorithm=hashes.SHA256(), length=32, salt=None,
+                    info=b"qportal-bb84-bank").derive(_pack(out["secret"]))
+    db.execute(
+        "INSERT INTO keys(source,backend,sessions,raw_qubits,sifted_bits,secret_bits,qber,job_ids,material_hex) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        ("simulator", out["backend"], out["sessions"], out["raw_qubits"], out["sifted_bits"],
+         len(out["secret"]), qber, "[]", _seal_material(material)),
+    )
+    return claim_login_key(user_id)
+
+
 def _user_key(key_id: int, user_id: int) -> bytes:
     row = db.one("SELECT material_hex FROM keys WHERE id=?", (key_id,))
     if not row:
         raise RuntimeError("Key not found.")
-    return HKDF(algorithm=hashes.SHA256(), length=32, salt=SERVER_SECRET, info=f"qportal-user:{user_id}".encode()).derive(bytes.fromhex(row["material_hex"]))
+    return HKDF(algorithm=hashes.SHA256(), length=32, salt=SERVER_SECRET, info=f"qportal-user:{user_id}".encode()).derive(_open_material(row["material_hex"]))
 
 
 def encrypt(user_id: int, key_id: int, payload: dict) -> dict:

@@ -28,6 +28,16 @@ IBM_INSTANCE = os.getenv("IBM_QUANTUM_INSTANCE", "").strip()
 # How long to wait for one IBM job (queue + run) before giving up and using the simulator instead.
 IBM_WAIT_SECONDS = int(os.getenv("IBM_WAIT_SECONDS", "240"))
 
+# Where the login BB84 handshake runs: "hardware" (real IBM quantum computer) or "simulator".
+# Default: real hardware whenever an IBM token is set. If IBM is slow, down or too noisy it falls back to the simulator.
+LOGIN_TARGET = os.getenv("QPORTAL_LOGIN_TARGET", "simulator").lower()
+BANK_TARGET = os.getenv("QPORTAL_BANK_TARGET", "simulator").lower()
+
+# Classic authentication remains the default; live BB84 is explicitly opt-in.
+LOGIN_MODE = os.getenv("QPORTAL_LOGIN_MODE", "classic").strip().lower()
+if LOGIN_MODE not in ("classic", "live"):
+    raise ValueError("QPORTAL_LOGIN_MODE must be classic or live")
+
 HISTORY_YEARS = int(os.getenv("QPORTAL_HISTORY_YEARS", "3"))
 PRICE_MAX_AGE_HOURS = int(os.getenv("QPORTAL_PRICE_MAX_AGE_HOURS", "4"))
 MAX_SHORTLIST = 12   # statevector QAOA stays interactive up to ~12 qubits

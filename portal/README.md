@@ -25,7 +25,10 @@ project; use a licensed data feed before running a public service).
 |---|---|---|
 | `QPORTAL_SECRET` | Secret for login tokens and key hardening. **Set this in production.** | auto-generated file in `portal/data/` |
 | `QPORTAL_KEY_TARGET` | Where BB84 circuits run: `simulator` or `hardware` | `simulator` |
-| `IBM_QUANTUM_TOKEN`, `IBM_QUANTUM_INSTANCE`, `IBM_BACKEND_NAME`, `IBM_WAIT_SECONDS` | Enables the IBM quantum processor option and hardware BB84 keys | unset |
+| `IBM_QUANTUM_TOKEN`, `IBM_QUANTUM_INSTANCE`, `IBM_BACKEND_NAME`, `IBM_WAIT_SECONDS` | Enables the optional IBM hardware exchange and hardware key-pool worker | unset |
+| `QPORTAL_LOGIN_MODE` | Login flow: `classic` (default) or browser/server `live` BB84 | `classic` |
+| `QPORTAL_LOGIN_TARGET` | Default login exchange target | `simulator` |
+| `QPORTAL_BANK_TARGET` | Background BB84 pool target (`simulator` or `hardware`) | `simulator` |
 | `QPORTAL_ORIGINS` | Comma-separated allowed browser origins if the front end is hosted elsewhere | none |
 | `QPORTAL_SYNTHETIC` | `1` = fake prices for automated tests only (the site shows a red banner) | `0` |
 
@@ -98,3 +101,12 @@ The regression tests check that the exact classical baseline returns the expecte
 * **Quantum vs ordinary methods** (every result page): the same problem is solved by exact search, greedy selection, simulated annealing and random search (`portal/combo.py`), and shown next to QAOA with the gap to the best basket, its rank, the number of objective evaluations and the time.
 * **Benchmark over many instances:** `python -m benchmarks.compare_methods_benchmark out.json` (seeded, about 4 minutes). At these sizes QAOA's most frequent basket is the exact best only 20-70% of the time, and greedy or annealing with a small budget usually match it. No quantum advantage is claimed.
 * **Tests:** `python -m unittest discover -s tests -v`.
+
+
+### BB84 login security changes
+
+See [LOGIN_BB84.md](../docs/LOGIN_BB84.md) for the actual Eve-in-the-login flow, simulator-first login, encrypted key storage, background pool configuration, rate limits, audit CSV, attack tests, and 12-account load-test instructions.
+
+### Browser/server live BB84 login
+
+Set `QPORTAL_LOGIN_MODE=live` to enable the page-load Alice/Bob exchange, the visible Eve switch, one-time HMAC proof, and the live audit. The original login remains the default (`classic`). See [LOGIN_BB84.md](../docs/LOGIN_BB84.md) for protocol details, the 65% sample-size adjustment, tests, and the class account test instructions. Qubits are simulated; there is no quantum channel to the browser.

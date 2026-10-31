@@ -35,6 +35,8 @@ class FairComparisonTests(unittest.TestCase):
         self.assertIn('function fairComparison(R)', source)
         self.assertIn('fairComparison(R),', source)
         self.assertIn('Fair comparison: QAOA vs classical search', source)
+        self.assertIn('Run QAOA sector mix', source)
+        self.assertIn('QAOA sector mix', source)
         self.assertIn('Matches exact optimum', source)
         self.assertIn('does not demonstrate a quantum speedup', source.lower())
 

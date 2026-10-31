@@ -267,7 +267,9 @@ def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
 
 
 # ----- public entry point --------------------------------------------------------------------------
-def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
+def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy", selection="most_frequent"):
+    """selection: 'most_frequent' = answer is the valid basket the circuit measured most often (pure QAOA output).
+    'best_of_shots' = score every sampled valid basket classically and keep the best (near-classical search)."""
     mu_s, sig_s = normalise(mu, sigma)
     n = len(mu_s)
     t0 = time.time()
@@ -347,7 +349,10 @@ def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
     rows.sort(key=lambda r: -r["prob"])
     out["samples"] = rows[:12]
     if feas:
-        pick = min(feas, key=lambda r: (r["fval"], -r["prob"]))
+        if selection == "best_of_shots":
+            pick = min(feas, key=lambda r: (r["fval"], -r["prob"]))
+        else:
+            pick = max(feas, key=lambda r: (r["prob"], -r["fval"]))
         out.update(idx=pick["idx"], fval=pick["fval"], rank=pick["rank"], matches_exact=pick["idx"] == best_key)
     else:
         out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True)

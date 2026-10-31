@@ -6,7 +6,7 @@ methods solve the SAME problem with the SAME objective and constraints:
   exact enumeration, greedy, simulated annealing, random search.
 Sampling methods run twice: with a small budget (10% of all valid baskets, at least 40 evaluations) and with a budget
 equal to the number of circuit evaluations QAOA used while training (capped at the number of valid baskets).
-Reported per method (10 seeded instances per size): share of instances where it found the exact best basket, mean and standard deviation of the gap to the best objective,
+Reported per method: share of instances where it found the exact best basket, mean gap to the best objective,
 mean rank (1 = best), and mean objective evaluations.  Nothing here claims quantum advantage.
 """
 import json
@@ -28,9 +28,9 @@ def run_one(mu, sigma, k, groups, sectorwise):
     mu_s, sig_s = solver.normalise(mu, sigma)
     t = time.time()
     if sectorwise:
-        sol = sector.solve_sector(mu, sigma, k, Q, groups, engine="qaoa_sim")
+        sol = sector.solve_sector(mu, sigma, k, Q, groups, engine="qaoa_sim", selection="best_of_shots")  # label "portal rule" below; the most-frequent row is read from the samples
     else:
-        sol = solver.solve(mu, sigma, k, Q, engine="qaoa_sim", mixer="xy")
+        sol = solver.solve(mu, sigma, k, Q, engine="qaoa_sim", mixer="xy", selection="best_of_shots")
     q_seconds = time.time() - t
     small = combo.compare(mu_s, sig_s, k, Q, groups)
     big = combo.compare(mu_s, sig_s, k, Q, groups, budget=min(sol["train_evals"], small["feasible"]))
@@ -59,7 +59,7 @@ def summarise(per_instance):
     out = {}
     for nm in names:
         rs = [inst[0][nm] for inst in per_instance]
-        out[nm] = {"hit_pct": 100 * float(np.mean([r["hit"] for r in rs])), "mean_gap_pct": float(np.mean([r["gap_pct"] for r in rs])), "std_gap_pct": float(np.std([r["gap_pct"] for r in rs], ddof=1)),
+        out[nm] = {"hit_pct": 100 * float(np.mean([r["hit"] for r in rs])), "mean_gap_pct": float(np.mean([r["gap_pct"] for r in rs])),
                    "mean_rank": float(np.mean([r["rank"] for r in rs])), "mean_evals": float(np.mean([r["evals"] for r in rs])),
                    "mean_seconds": float(np.mean([r["seconds"] for r in rs]))}
     return out, float(np.mean([i[1] for i in per_instance])), float(np.mean([i[2] / i[3] for i in per_instance]))
@@ -89,9 +89,9 @@ def main(out_path=None):
         json.dump(report, open(out_path, "w"), indent=2)
     for title, block in report.items():
         print(f"\n{title}: {block['valid_baskets']:.0f} valid baskets, QAOA best-basket chance = {block['qaoa_lift_over_blind']:.1f}x blind")
-        print(f"{'method':44s} {'hit %':>6s} {'gap %':>7s} {'sd':>6s} {'rank':>6s} {'evals':>7s}")
+        print(f"{'method':44s} {'hit %':>6s} {'gap %':>7s} {'rank':>6s} {'evals':>7s}")
         for nm, m in block["methods"].items():
-            print(f"{nm:44s} {m['hit_pct']:6.0f} {m['mean_gap_pct']:7.2f} {m['std_gap_pct']:6.2f} {m['mean_rank']:6.1f} {m['mean_evals']:7.0f}")
+            print(f"{nm:44s} {m['hit_pct']:6.0f} {m['mean_gap_pct']:7.2f} {m['mean_rank']:6.1f} {m['mean_evals']:7.0f}")
     return report
 
 

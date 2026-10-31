@@ -27,6 +27,27 @@ class AllocateCounts(unittest.TestCase):
         self.assertEqual(sum(c), 5)
         self.assertLessEqual(c[0], 2)
 
+    def test_shortlist_leaves_a_choice_for_qaoa(self):
+        self.assertGreater(sector.shortlist_per_sector(3, 9) * 3, 9)
+        self.assertLessEqual(sector.shortlist_per_sector(5, 5) * 5, 12)
+        self.assertGreaterEqual(sector.shortlist_per_sector(4, 4), 2)
+
+
+class SectorMixQaoa(unittest.TestCase):
+    def test_picks_requested_number_of_sectors(self):
+        mu, sigma = instance(6, seed=9)
+        out = sector.pick_sectors(mu, sigma, 3, 0.5, maxiter=30)
+        self.assertFalse(out.get("skipped"))
+        self.assertEqual(len(out["idx"]), 3)
+        self.assertEqual(out["qubits"], 6)
+        self.assertNotEqual(out["engine"], "classical")
+
+    def test_skips_qaoa_when_every_sector_is_kept(self):
+        mu, sigma = instance(3, seed=8)
+        out = sector.pick_sectors(mu, sigma, 3, 0.5)
+        self.assertTrue(out["skipped"])
+        self.assertEqual(out["idx"], [0, 1, 2])
+
 
 class SectorSolver(unittest.TestCase):
     def test_every_sample_keeps_sector_counts(self):

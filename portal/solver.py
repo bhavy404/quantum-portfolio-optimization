@@ -267,97 +267,319 @@ def _run_hardware(qp, params, reps, e_range, n, shots=SHOTS, mixer="x", k=None):
 
 
 # ----- public entry point --------------------------------------------------------------------------
+
 def solve(mu, sigma, k, q, engine="qaoa_sim", reps=2, maxiter=100, mixer="xy"):
+    """Solve cardinality-constrained portfolio selection with QAOA or exact search.
+
+    Timing fields separate exact enumeration from the QAOA pipeline.
+    Legacy output fields are retained for application compatibility.
+    """
+    t0 = time.perf_counter()
+
+    # Input normalization.
+    t_pre = time.perf_counter()
     mu_s, sig_s = normalise(mu, sigma)
     n = len(mu_s)
-    t0 = time.time()
-    exact_t0 = time.time()
+    preprocessing_seconds = time.perf_counter() - t_pre
+
+    # Exact classical reference solution.
+    t_exact = time.perf_counter()
     ranked = exact(mu_s, sig_s, k, q)
-    exact_seconds = round(time.time() - exact_t0, 4)
+    exact_seconds = time.perf_counter() - t_exact
+
+    if not ranked:
+        raise ValueError("No feasible portfolio baskets exist for the supplied inputs.")
+
     best_exact = ranked[0]
-    rank_of = {combo: r + 1 for r, (_, combo) in enumerate(ranked)}
+    best_key = tuple(best_exact[1])
+    rank_of = {basket: r + 1 for r, (_, basket) in enumerate(ranked)}
+
     out = {
-        "engine": engine, "qubits": n, "reps": reps, "maxiter": maxiter, "mixer": mixer,
+        "engine": engine,
+        "qubits": n,
+        "reps": reps,
+        "maxiter": maxiter,
+        "mixer": mixer,
         "exact": {"idx": list(best_exact[1]), "fval": best_exact[0]},
-        "feasible_baskets": len(ranked), "backend": None, "job_id": None, "circuit_depth": None,
-        "exact_seconds": exact_seconds, "objective_exact": float(best_exact[0]),
-        "cx_gates": None, "samples": [], "note": "", "shots": 0,
-        "p_best": None, "p_best_blind": 1.0 / len(ranked), "train_evals": 0,
+        "feasible_baskets": len(ranked),
+        "backend": None,
+        "job_id": None,
+        "circuit_depth": None,
+        "cx_gates": None,
+        "samples": [],
+        "note": "",
+        "shots": 0,
+        "p_best": None,
+        "p_best_blind": 1.0 / len(ranked),
+        "p_best_statevector": None,
+        "p_best_empirical": None,
+        "p_best_source": None,
+        "statevector_feasible_mass": None,
+        "feasible_mass": None,
+        "qaoa_sample_found_feasible": False,
+        "used_exact_fallback": False,
+        "exact_seconds": round(exact_seconds, 6),
+        "preprocessing_seconds": round(preprocessing_seconds, 6),
+        "training_seconds": 0.0,
+        "statevector_seconds": 0.0,
+        "circuit_build_seconds": 0.0,
+        "sampling_seconds": 0.0,
+        "postprocessing_seconds": 0.0,
+        "objective_exact": float(best_exact[0]),
+        "train_evals": 0,
     }
+
+    # Exact-only mode.
     if engine == "classical":
-        out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True, feasible_mass=1.0,
-                   label="Classical exact search", seconds=round(time.time() - t0, 4), qaoa_seconds=0.0)
+        total_seconds = time.perf_counter() - t0
+        out.update(
+            idx=list(best_exact[1]),
+            fval=float(best_exact[0]),
+            rank=1,
+            matches_exact=True,
+            feasible_mass=1.0,
+            label="Classical exact search",
+            seconds=round(total_seconds, 6),
+            total_seconds=round(total_seconds, 6),
+            qaoa_seconds=0.0,
+            objective_selected=float(best_exact[0]),
+            objective_gap_pct=0.0,
+            engine="classical",
+            p_best_source="not_applicable_classical",
+        )
         return out
 
+    # Build the objective and feasible-state mask.
+    t_pre_qaoa = time.perf_counter()
     E, feasible, penalty, X = _energies(mu_s, sig_s, k, q)
+
     if mixer == "xy":
-        # The state never leaves the valid baskets, where the penalty is a constant. Scale by the valid range only.
+        # The XY mixer preserves cardinality, so normalize over feasible energies.
         e_range = float(E[feasible].max() - E[feasible].min()) or 1.0
         e_norm = (E - E[feasible].min()) / e_range
     else:
         e_range = float(E.max() - E.min()) or 1.0
         e_norm = (E - E.min()) / e_range
-    progress.say(f"Training the quantum circuit on a simulator ({n} qubits)")
-    params, _, evals = _train(e_norm, n, reps, maxiter, mixer=mixer, k=k)
-    out["train_evals"] = evals
-    probs = np.abs(_state(params, e_norm, n, reps, mixer, k)) ** 2
-    qp = _qubo_program(mu_s, sig_s, k, q, penalty)
-    out["circuit_depth"], out["cx_gates"] = _depth(qp, params, reps, e_range, mixer, k)
-    out["shots"] = SHOTS
 
+    preprocessing_seconds += time.perf_counter() - t_pre_qaoa
+
+    # Train QAOA parameters.
+    progress.say(f"Training the quantum circuit on a simulator ({n} qubits)")
+    t_train = time.perf_counter()
+    params, _, evals = _train(
+        e_norm, n, reps, maxiter, mixer=mixer, k=k
+    )
+    training_seconds = time.perf_counter() - t_train
+    out["train_evals"] = int(evals)
+
+    # Calculate ideal statevector probabilities.
+    t_state = time.perf_counter()
+    probs = np.abs(_state(params, e_norm, n, reps, mixer, k)) ** 2
+    prob_sum = float(probs.sum())
+
+    if prob_sum <= 0.0:
+        raise RuntimeError("The QAOA statevector has zero total probability.")
+
+    probs = probs / prob_sum
+    best_state = sum(1 << i for i in best_key)
+    p_best_statevector = float(probs[best_state])
+    statevector_feasible_mass = float(probs[feasible].sum())
+    statevector_seconds = time.perf_counter() - t_state
+
+    # Construct the QUBO and compile the circuit for resource estimates.
+    t_circuit = time.perf_counter()
+    qp = _qubo_program(mu_s, sig_s, k, q, penalty)
+    circuit_depth, cx_gates = _depth(
+        qp, params, reps, e_range, mixer, k
+    )
+    circuit_build_seconds = time.perf_counter() - t_circuit
+
+    out.update(
+        circuit_depth=circuit_depth,
+        cx_gates=cx_gates,
+        shots=SHOTS,
+        p_best_statevector=p_best_statevector,
+        statevector_feasible_mass=statevector_feasible_mass,
+    )
+
+    # Execute on IBM hardware if requested; otherwise sample the simulator.
     hw_fail = None
+    sampling_engine = engine
+    shot_counts = None
+    total = 0
+
     if engine == "qaoa_hw":
+        t_sampling = time.perf_counter()
         try:
             progress.say("Connecting to IBM Quantum")
-            counts, name, job_id, hw_depth = _run_hardware(qp, params, reps, e_range, n, mixer=mixer, k=k)
-        except Exception as ex:
-            hw_fail = f"IBM hardware could not finish this run ({ex}); the simulator result is shown instead."
-            print("[ibm]", hw_fail)
-            engine = "qaoa_sim"
-            out["engine"] = "qaoa_sim"
-    if engine == "qaoa_hw":
-        total = sum(counts.values())
-        measured = {}
-        for bits, c in counts.items():
-            z = sum(int(b) << i for i, b in enumerate(bits[::-1][:n]))  # rightmost character = qubit 0
-            measured[z] = measured.get(z, 0) + c
-        out.update(label="QAOA (IBM quantum processor)", backend=name, job_id=job_id, circuit_depth=hw_depth)
-        out["note"] = "Circuit angles were trained on a simulator, then the circuit was run on the IBM processor."
-        shot_counts = measured
-    else:
-        rng = np.random.default_rng(11)
-        draws = rng.choice(len(probs), size=SHOTS, p=probs / probs.sum())
-        shot_counts = dict(zip(*np.unique(draws, return_counts=True)))
-        out.update(label="QAOA (quantum circuit simulator)", backend="Exact state-vector simulation")
-        total = SHOTS
+            counts, name, job_id, hw_depth = _run_hardware(
+                qp, params, reps, e_range, n,
+                mixer=mixer, k=k
+            )
 
+            measured = {}
+            for bits, count in counts.items():
+                z = sum(
+                    int(bit) << i
+                    for i, bit in enumerate(bits[::-1][:n])
+                )
+                measured[z] = measured.get(z, 0) + count
+
+            shot_counts = measured
+            total = sum(measured.values())
+
+            if total <= 0:
+                raise RuntimeError("IBM hardware returned no measurement shots.")
+
+            out.update(
+                label="QAOA (IBM quantum processor)",
+                backend=name,
+                job_id=job_id,
+                circuit_depth=hw_depth,
+                note=(
+                    "Circuit angles were trained on a simulator, then the "
+                    "circuit was run on the IBM processor."
+                ),
+            )
+        except Exception as ex:
+            hw_fail = (
+                f"IBM hardware could not finish this run ({ex}); "
+                "the simulator result is shown instead."
+            )
+            print("[ibm]", hw_fail)
+            sampling_engine = "qaoa_sim"
+            out["engine"] = "qaoa_sim"
+
+        if shot_counts is None:
+            rng = np.random.default_rng(11)
+            draws = rng.choice(len(probs), size=SHOTS, p=probs)
+            unique, counts = np.unique(draws, return_counts=True)
+            shot_counts = dict(zip(unique.tolist(), counts.tolist()))
+            total = SHOTS
+            out.update(
+                label="QAOA (quantum circuit simulator)",
+                backend="Exact state-vector simulation",
+            )
+
+        sampling_seconds = time.perf_counter() - t_sampling
+
+    else:
+        t_sampling = time.perf_counter()
+        rng = np.random.default_rng(11)
+        draws = rng.choice(len(probs), size=SHOTS, p=probs)
+        unique, counts = np.unique(draws, return_counts=True)
+        shot_counts = dict(zip(unique.tolist(), counts.tolist()))
+        total = SHOTS
+        sampling_seconds = time.perf_counter() - t_sampling
+
+        out.update(
+            label="QAOA (quantum circuit simulator)",
+            backend="Exact state-vector simulation",
+        )
+
+    if total <= 0:
+        raise RuntimeError("No measurement shots were available for postprocessing.")
+
+    # Convert bitstrings into sampled portfolio rows.
+    t_post = time.perf_counter()
     rows = []
-    for z, c in shot_counts.items():
+    empirical_counts = {}
+
+    for z, count in shot_counts.items():
         z = int(z)
         idx = tuple(int(i) for i in np.flatnonzero(X[z]))
+        empirical_counts[idx] = empirical_counts.get(idx, 0) + int(count)
+
         ok = bool(feasible[z])
-        rows.append({"idx": list(idx), "prob": c / total, "feasible": ok,
-                     "fval": objective(X[z], mu_s, sig_s, k, q) if ok else None, "rank": rank_of.get(idx)})
-    feas = [r for r in rows if r["feasible"]]
-    out["feasible_mass"] = float(sum(r["prob"] for r in feas))
-    best_key = out["exact"]["idx"]
-    out["p_best"] = float(next((r["prob"] for r in rows if r["idx"] == best_key), 0.0))
-    if engine == "qaoa_sim":
-        out["p_best"] = float(probs[sum(1 << i for i in best_key)])  # exact probability, no sampling noise
-    rows.sort(key=lambda r: -r["prob"])
-    out["samples"] = rows[:12]
-    if feas:
-        pick = min(feas, key=lambda r: (r["fval"], -r["prob"]))
-        out.update(idx=pick["idx"], fval=pick["fval"], rank=pick["rank"], matches_exact=pick["idx"] == best_key)
+        rows.append({
+            "idx": list(idx),
+            "prob": int(count) / total,
+            "feasible": ok,
+            "fval": float(objective(X[z], mu_s, sig_s, k, q)) if ok else None,
+            "rank": rank_of.get(idx),
+        })
+
+    feasible_rows = [row for row in rows if row["feasible"]]
+    feasible_shots = sum(
+        int(count)
+        for z, count in shot_counts.items()
+        if feasible[int(z)]
+    )
+
+    sampled_feasible_mass = float(feasible_shots / total)
+    p_best_empirical = float(empirical_counts.get(best_key, 0) / total)
+
+    out.update(
+        feasible_mass=sampled_feasible_mass,
+        qaoa_sample_found_feasible=bool(feasible_rows),
+        p_best_empirical=p_best_empirical,
+    )
+
+    # Preserve the legacy p_best field and explicitly identify its meaning.
+    if sampling_engine == "qaoa_sim":
+        out["p_best"] = p_best_statevector
+        out["p_best_source"] = "ideal_statevector_probability"
     else:
-        out.update(idx=list(best_exact[1]), fval=best_exact[0], rank=1, matches_exact=True)
-        out["note"] = "The circuit produced no valid basket this time, so the exact answer is shown."
+        out["p_best"] = p_best_empirical
+        out["p_best_source"] = "hardware_empirical_shot_frequency"
+
+    rows.sort(key=lambda row: -row["prob"])
+    out["samples"] = rows[:12]
+
+    if feasible_rows:
+        pick = min(
+            feasible_rows,
+            key=lambda row: (row["fval"], -row["prob"]),
+        )
+        out.update(
+            idx=pick["idx"],
+            fval=float(pick["fval"]),
+            rank=pick["rank"],
+            matches_exact=tuple(pick["idx"]) == best_key,
+        )
+    else:
+        # Explicitly identify the exact classical fallback.
+        out.update(
+            idx=list(best_exact[1]),
+            fval=float(best_exact[0]),
+            rank=1,
+            matches_exact=True,
+            used_exact_fallback=True,
+        )
+        out["note"] = (
+            "The circuit produced no valid measured basket; "
+            "the exact classical optimum is shown as a fallback."
+        )
+
     if hw_fail:
-        out["note"] = hw_fail + (" " + out["note"] if out["note"] else "")
-    out["seconds"] = round(time.time() - t0, 4)
-    out["qaoa_seconds"] = round(max(0.0, out["seconds"] - exact_seconds), 4)
-    out["objective_selected"] = float(out["fval"])
-    # Lower objective is better. The percentage gap is descriptive only when the optimum is positive.
+        out["note"] = hw_fail + (
+            " " + out["note"] if out["note"] else ""
+        )
+
+    postprocessing_seconds = time.perf_counter() - t_post
+    total_seconds = time.perf_counter() - t0
+
+    # This is the post-exact pipeline time, not pure quantum execution time.
+    qaoa_pipeline_seconds = max(0.0, total_seconds - exact_seconds)
+
+    out.update(
+        preprocessing_seconds=round(preprocessing_seconds, 6),
+        training_seconds=round(training_seconds, 6),
+        statevector_seconds=round(statevector_seconds, 6),
+        circuit_build_seconds=round(circuit_build_seconds, 6),
+        sampling_seconds=round(sampling_seconds, 6),
+        postprocessing_seconds=round(postprocessing_seconds, 6),
+        qaoa_seconds=round(qaoa_pipeline_seconds, 6),
+        seconds=round(total_seconds, 6),
+        total_seconds=round(total_seconds, 6),
+        objective_selected=float(out["fval"]),
+    )
+
+    # Lower objective is better. The percentage gap is descriptive.
     denom = abs(float(best_exact[0]))
-    out["objective_gap_pct"] = (100.0 * (float(out["fval"]) - float(best_exact[0])) / denom) if denom > 1e-12 else None
+    out["objective_gap_pct"] = (
+        100.0 * (float(out["fval"]) - float(best_exact[0])) / denom
+        if denom > 1e-12 else None
+    )
+
     return out

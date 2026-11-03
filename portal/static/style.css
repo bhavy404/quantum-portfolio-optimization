@@ -418,3 +418,62 @@ dl.kv dt { color: var(--muted); } dl.kv dd { margin: 0; }
 .qber-fill { display:block; height:100%; border-radius:10px; background:#c85a5a; }
 .live-attempt.is-secure .qber-fill { background:#27844e; }
 .qber-limit-line { position:absolute; top:-4px; bottom:-4px; left:27.5%; width:2px; background:var(--ink); outline:1px solid var(--surface); }
+/* Simplified live login security details */
+.live-security-details {
+  margin-top: 14px;
+}
+
+.live-security-details summary {
+  color: var(--blue);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.live-security-details[open] {
+  padding-top: 8px;
+}
+
+.live-bb84-panel .live-status {
+  margin-bottom: 12px;
+}
+/* ---- design tokens that earlier rules referenced but never defined ---- */
+:root { --surface-2: #EEF2F6; --accent: #2A78D6; }
+@media (prefers-color-scheme: dark) { :root:where(:not([data-theme="light"])) { --surface-2: #1E2A3F; --accent: #3987E5; } }
+:root[data-theme="dark"] { --surface-2: #1E2A3F; --accent: #3987E5; }
+
+/* ---- sign-in activity list (plain English) ---- */
+.activity-list { list-style: none; margin: 0; padding: 0; }
+.activity { display: flex; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
+.activity:first-child { border-top: 0; padding-top: 0; }
+.activity-dot { flex: none; width: 12px; height: 12px; margin-top: 6px; border-radius: 50%; background: var(--gain); }
+.activity.bad .activity-dot { background: var(--loss); }
+.activity.warn .activity-dot { background: var(--orange); }
+.activity p { margin: 2px 0 0; color: var(--ink-2); font-size: .92rem; max-width: 64ch; }
+.activity > div { min-width: 0; }
+.demo-link { margin: 14px 0 0; text-align: center; font-size: .92rem; color: var(--muted); }
+.demo-link a { color: var(--blue); font-weight: 600; }
+
+/* ---- phone layout (<= 640px): sign-in, security and demo pages ---- */
+@media (max-width: 640px) {
+  body { overflow-x: hidden; }
+  .login { gap: 20px; padding-top: 8px; }
+  .login > *, .panel, .live-bb84-panel { min-width: 0; }
+  .login .pitch h1 { font-size: 1.7rem; line-height: 1.2; }
+  .login .pitch p { font-size: 1rem; }
+  .panel { padding: 16px; }
+  .tabs button { flex: 1; padding: 12px 8px; }
+  input[type=text], input[type=email], input[type=password], input[type=number], select { font-size: 16px; }  /* stops iOS zooming on focus */
+  .btn { min-height: 48px; }
+  .btn.small { min-height: 40px; }
+  .panel-heading { flex-direction: column; gap: 8px; }
+  .panel-heading .chip { align-self: flex-start; white-space: normal; }
+  .test-actions .btn, .welcome-actions .btn { flex: 1 1 100%; }
+  .keyprint-actions { flex-wrap: wrap; }
+  dl.kv { display: block; }
+  dl.kv dt { margin-top: 10px; font-size: .82rem; }
+  dl.kv dd { overflow-wrap: anywhere; }
+  .live-key-line { font-size: .85rem; }
+  .live-simulation-note { font-size: .85rem; }
+  .sec-opts { padding: 6px 10px; }
+  .pagehead h1 { font-size: 1.55rem; }
+}

@@ -110,3 +110,19 @@ See [LOGIN_BB84.md](../docs/LOGIN_BB84.md) for the actual Eve-in-the-login flow,
 ### Browser/server live BB84 login
 
 Set `QPORTAL_LOGIN_MODE=live` to enable the page-load Alice/Bob exchange, the visible Eve switch, one-time HMAC proof, and the live audit. The original login remains the default (`classic`). See [LOGIN_BB84.md](../docs/LOGIN_BB84.md) for protocol details, the 65% sample-size adjustment, tests, and the class account test instructions. Qubits are simulated; there is no quantum channel to the browser.
+
+
+## Clean macOS setup (Python 3.12)
+
+Use `RUN_QPORTAL_MAC.command` from the project root. It removes only the project's local `.venv`, creates a fresh Python 3.12 environment, installs the pinned dependency set from `portal/requirements.txt`, checks imports and launches the web app. It does not use the system Python packages.
+
+The bundled virtual environment, Python bytecode caches, generated SQLite database files and local server secret are intentionally excluded from this source ZIP. QPortal creates fresh local runtime data and a new server secret on first launch. IBM Quantum credentials are optional; the app defaults to its simulator unless configured otherwise.
+
+For terminal use:
+
+```bash
+chmod +x RUN_QPORTAL_MAC.command
+./RUN_QPORTAL_MAC.command
+```
+
+Then open http://127.0.0.1:8000.

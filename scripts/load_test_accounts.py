@@ -123,7 +123,10 @@ def main():
     attack_accounts=0
     for idx,(email,password,name) in enumerate(users):
         registration_out,registration_hs,reg_ms=auth_request(args.base_url,"register",email,password,name,False)
-        account_tokens=[registration_out["token"]]
+        # Registration creates the account only and returns no token; tokens come from the logins below.
+        if registration_out.get("token"): raise AssertionError("register must not return a login token")
+        if not registration_out.get("created"): raise AssertionError("register did not confirm the account was created")
+        account_tokens=[]
         for login_no in range(1,4):
             t0=time.perf_counter(); out,hs,elapsed=auth_request(args.base_url,"login",email,password,name,login_no==1)
             login_ms.append(elapsed); login_count+=1

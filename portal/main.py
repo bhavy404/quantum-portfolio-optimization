@@ -195,9 +195,44 @@ def _secure_session(user: dict, event: str, eve_test: bool, use_ibm: bool) -> di
         security, atag = loginkey.establish(user["id"], event, eve_test, use_ibm)
     except RuntimeError as exc:
         raise HTTPException(503, str(exc))
+    # Classic logins consume one pre-made key from the bank, so refill it in the background.
+    keybank.top_up_async(target=config.BANK_TARGET)
     return {"token": auth.make_token(user, security["session_id"], atag),
             "user": {"id": user["id"], "email": user["email"], "name": user["name"]},
             "security": security}
+
+
+def _record_live_audit(email: str, event: str) -> None:
+    """Live mode keeps its BB84 detail in bb84_live_audit; this adds the plain sign-in activity row."""
+    db.execute(
+        "INSERT INTO login_audit(account,event,backend,secret_bits,error_rate,eve_tested,eve_detected,latency_ms,outcome) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (email.strip().lower(), event, "Live BB84 (simulated qubits)", None, None, 0, 0, 0, "accepted"))
+
+
+def _plain_activity(row: dict) -> dict:
+    """Turn one audit row into a sentence a non-technical person can read."""
+    event, outcome = row["event"], row["outcome"]
+    ran_on = row.get("backend") or ""
+    if outcome == "rejected_credentials":
+        return {"when": row["event_time"], "level": "bad", "title": "Sign-in blocked",
+                "detail": "A sign-in attempt used the wrong password, so no secure session was started."}
+    if event == "safety_check":
+        return {"when": row["event_time"], "level": "good", "title": "Safety check run",
+                "detail": "A pretend snooper was caught, that key was thrown away, and a clean one was used instead."}
+    if event == "signup":
+        title = "Account created"
+        detail = "Your account was set up and the secure key check passed."
+    else:
+        title = "Signed in"
+        detail = "The secure key check passed and nobody was listening in."
+    if row.get("eve_tested") and row.get("eve_detected"):
+        detail = "A test eavesdropper was caught, that key was thrown away, and a clean one was used instead."
+    if "IBM" in ran_on or "ibm_" in ran_on.lower():
+        detail += " The key was made on a real IBM quantum computer."
+    elif ran_on:
+        detail += " The key was made on a simulated quantum computer."
+    return {"when": row["event_time"], "level": "good", "title": title, "detail": detail}
 
 
 @app.post("/api/bb84/start")
@@ -255,6 +290,7 @@ def _live_session(user: dict, body, mode: str) -> dict:
         raise HTTPException(401, str(exc))
     # In live mode the proof is checked once here; subsequent API calls use the
     # ordinary signed application token and do not sign every request with BB84.
+    _record_live_audit(user["email"], "login")
     return {"token": auth.make_live_token(user),
             "user": {"id": user["id"], "email": user["email"], "name": user["name"]},
             "security": {"mode": "live", "status": "SECURE_KEY_ESTABLISHED",
@@ -264,23 +300,28 @@ def _live_session(user: dict, body, mode: str) -> dict:
 
 @app.post("/api/auth/register")
 def register(body: Signup, request: Request):
+    """Create an account only. A separate /login request is required to sign in."""
     _rate_limit(request, "signup", body.email)
     if config.LOGIN_MODE == "live":
-        # Validate and consume the browser's one-time BB84 proof before creating the account.
+        # Validate and consume the browser's one-time BB84 signup proof.
         try:
-            live_key = qkd_live.verify_and_consume(body.session_id or "", body.email, "signup", body.proof or "")
+            qkd_live.verify_and_consume(body.session_id or "", body.email, "signup", body.proof or "")
         except ValueError as exc:
             raise HTTPException(401, str(exc))
-        user = auth.register(body.email, body.password, body.name)
-        keybank.top_up_async(target=config.BANK_TARGET)
-        return {"token": auth.make_live_token(user), "user": user,
-                "security": {"mode": "live", "status": "SECURE_KEY_ESTABLISHED",
-                             "fingerprint": qkd_live.fingerprint(live_key),
-                             "note": "Qubits are simulated in this demo."}}
     user = auth.register(body.email, body.password, body.name)
+    if config.LOGIN_MODE == "live":
+        _record_live_audit(user["email"], "signup")
+    else:
+        # Classic mode: still run and record the BB84 sign-up exchange (audit row + login_sessions row),
+        # but throw the session token away. Sign-up creates the account only; the person logs in next.
+        try:
+            loginkey.establish(user["id"], "signup", body.eve_test, _want_ibm(body.use_ibm))
+        except RuntimeError as exc:
+            # The account already exists; a key-exchange hiccup must not make sign-up look failed.
+            print(f"[signup] BB84 sign-up exchange could not be recorded: {exc}")
     keybank.top_up_async(target=config.BANK_TARGET)
     full = db.one("SELECT id,email,name FROM users WHERE id=?", (user["id"],))
-    return _secure_session(full, "signup", body.eve_test, body.use_ibm)
+    return {"created": True, "user": full}
 
 
 @app.post("/api/auth/login")
@@ -766,6 +807,35 @@ def delete_run(run_id: int, user=Depends(auth.current_user)):
     return {"ok": True}
 
 
+@app.post("/api/security/safety-check")
+def record_safety_check(user=Depends(auth.current_user)):
+    """Save a finished 'safety check' on this account's activity list.
+
+    The check itself runs through the normal BB84 endpoints, with this account's email on each attempt. Here we only
+    confirm that the account really did just catch a pretend eavesdropper and then accept a clean key, so the activity
+    list cannot be filled with checks that never ran."""
+    email = user["email"].strip().lower()
+    caught = db.one("SELECT id FROM bb84_live_audit WHERE account=? AND eve_on=1 AND verdict='eavesdropper_detected' "
+                    "AND event_time >= datetime('now','-5 minutes') ORDER BY id DESC LIMIT 1", (email,))
+    clean = db.one("SELECT id FROM bb84_live_audit WHERE account=? AND eve_on=0 AND verdict='secure' "
+                   "AND id > ? ORDER BY id DESC LIMIT 1", (email, caught["id"])) if caught else None
+    if not (caught and clean):
+        raise HTTPException(400, "Run the safety check first: a snooper must be caught and then a clean key accepted.")
+    db.execute(
+        "INSERT INTO login_audit(account,event,backend,secret_bits,error_rate,eve_tested,eve_detected,latency_ms,outcome) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        (email, "safety_check", "Live BB84 (simulated qubits)", None, None, 1, 1, 0, "accepted"))
+    return {"saved": True}
+
+
+@app.get("/api/security/activity")
+def security_activity(user=Depends(auth.current_user)):
+    """Recent sign-in activity for this account, worded for non-technical readers."""
+    rows = db.query("SELECT event_time,event,backend,error_rate,eve_tested,eve_detected,outcome "
+                    "FROM login_audit WHERE account=? ORDER BY id DESC LIMIT 20", (user["email"].strip().lower(),))
+    return {"items": [_plain_activity(r) for r in rows]}
+
+
 @app.get("/api/security/status")
 def security_status(user=Depends(auth.current_user)):
     status = keybank.status_for(user["id"])
@@ -889,4 +959,11 @@ app.mount("/static", StaticFiles(directory=str(STATIC)), name="static")
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html")
+    return FileResponse(
+        STATIC / "index.html",
+        headers={
+            "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        },
+    )

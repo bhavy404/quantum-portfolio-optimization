@@ -1,39 +1,7 @@
-# ============================================================
-# Core quantum computing packages
-# ============================================================
-qiskit>=1.0.0
-qiskit-ibm-runtime>=0.23.0
-qiskit-aer>=0.14.0
+# Root requirements: the same pinned set the portal uses (see portal/requirements.txt),
+# plus the two packages that only generate_pdf_report.py needs.
+# Versions were checked on PyPI and installed together on Python 3.12 with `pip check` passing.
+-r portal/requirements.txt
 
-# ============================================================
-# Portfolio optimization (QAOA)
-# ============================================================
-qiskit-optimization
-qiskit-algorithms
-
-# ============================================================
-# Data / finance
-# ============================================================
-yfinance
-numpy
-pandas
-scipy
-
-# ============================================================
-# Web API (dashboard)
-# ============================================================
-fastapi
-uvicorn
-
-# ============================================================
-# Configuration / security
-# ============================================================
-python-dotenv>=1.0.1
-
-# ============================================================
-# NOTE: Python 3.10+ is required for full IBM Quantum support.
-# macOS system Python 3.9 (LibreSSL) has TLS compatibility
-# issues with IBM Cloud endpoints (api.global-search-tagging).
-# Use Python from Homebrew, pyenv, or python.org (>= 3.10)
-# which link against OpenSSL.
-# ============================================================
+matplotlib>=3.9,<4
+reportlab>=4,<5

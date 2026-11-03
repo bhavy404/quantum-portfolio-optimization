@@ -1,16 +1,21 @@
-# QPortal web app (portal/). Install with:  pip install -r portal/requirements.txt
-fastapi
-uvicorn
-pydantic>=2
-pyjwt
-cryptography
-python-dotenv
-numpy
-pandas
-scipy
-yfinance
-qiskit>=1.0
-qiskit-aer
-qiskit-optimization
-qiskit-ibm-runtime
-qiskit-algorithms
+# QPortal Mac / Python 3.12 dependency set.
+# Keep NumPy 2.x: project dependencies use np.long / np.ulong.
+# Pandas and SciPy are pinned to wheels compatible with NumPy 2.5.x.
+fastapi>=0.115,<1
+uvicorn[standard]>=0.34,<1
+pydantic>=2.13,<3
+PyJWT>=2.10,<3
+cryptography>=44,<47
+python-dotenv>=1.0,<2
+
+numpy==2.5.4
+pandas==3.1.0
+scipy==1.18.1
+yfinance>=0.2.65,<2
+
+# Qiskit stack: mutually compatible versions for this project.
+qiskit==2.4.1
+qiskit-aer==0.18.2
+qiskit-ibm-runtime==0.51.0
+qiskit-optimization==0.7.0
+qiskit-algorithms==0.4.0

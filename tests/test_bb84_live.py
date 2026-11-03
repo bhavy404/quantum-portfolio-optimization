@@ -176,17 +176,37 @@ def test_live_api_requires_proof_and_checks_it_once(monkeypatch):
     response = client.post("/api/auth/register", json={"email": email, "password": "throwaway-123", "name": "Live Test",
         "session_id": start["session_id"], "proof": proof})
     assert response.status_code == 200, response.text
-    token = response.json()["token"]
+    # Registration only creates the account: it must NOT hand out a login token.
+    assert response.json()["created"] is True
+    assert "token" not in response.json()
+    # The signup proof was consumed, so signing in needs its own fresh BB84 exchange.
+    login_start, _, _, login_key = clean_browser_exchange(account=email)
+    login_proof = qkd_live.make_proof(login_key, login_start["session_id"], email, "login")
+    logged_in = client.post("/api/auth/login", json={"email": email, "password": "throwaway-123",
+        "session_id": login_start["session_id"], "proof": login_proof})
+    assert logged_in.status_code == 200, logged_in.text
+    token = logged_in.json()["token"]
     me = client.get("/api/me", headers={"Authorization": "Bearer " + token})
     assert me.status_code == 200
     # Normal JWT logout revokes the app session without using the BB84 key per request.
     logged_out = client.post("/api/auth/logout", headers={"Authorization": "Bearer " + token})
     assert logged_out.status_code == 200
     assert client.get("/api/me", headers={"Authorization": "Bearer " + token}).status_code == 401
-    # Reuse of the same browser session for a second login is rejected.
+    # Reuse of an already-consumed browser session for another login is rejected.
     response = client.post("/api/auth/login", json={"email": email, "password": "throwaway-123",
-        "session_id": start["session_id"], "proof": proof})
+        "session_id": login_start["session_id"], "proof": login_proof})
     assert response.status_code == 401
+    # The sign-up and the login both show up in the plain-English activity feed.
+    # (token was revoked by logout above, so sign in once more to read it.)
+    again_start, _, _, again_key = clean_browser_exchange(account=email)
+    again = client.post("/api/auth/login", json={"email": email, "password": "throwaway-123",
+        "session_id": again_start["session_id"],
+        "proof": qkd_live.make_proof(again_key, again_start["session_id"], email, "login")})
+    assert again.status_code == 200, again.text
+    feed = client.get("/api/security/activity", headers={"Authorization": "Bearer " + again.json()["token"]})
+    assert feed.status_code == 200
+    titles = [i["title"] for i in feed.json()["items"]]
+    assert "Account created" in titles and "Signed in" in titles
 
 
 def test_audit_records_required_live_fields():

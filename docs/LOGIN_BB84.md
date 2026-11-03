@@ -22,7 +22,8 @@ Qubits are simulated in this demo. There is no quantum channel to the browser an
 - `POST /api/bb84/start` — create Alice's 1,600 simulated qubits on the server (nothing about the states is returned); optional Eve injection and attempt group ID.
 - `POST /api/bb84/sift` — receive Bob's bases, return Bob's measured bits, Alice's bases and the sample positions.
 - `POST /api/bb84/sample` — compare the disclosed sample, compute QBER / upper bound, record the verdict and derive the server-side key only for a secure clean exchange.
-- `POST /api/auth/login` and `/api/auth/register` — require the one-time browser HMAC proof in live mode.
+- `POST /api/auth/login` and `/api/auth/register` — require the one-time browser HMAC proof in live mode. Register only creates the account and returns no token; the person then logs in with a fresh exchange.
+- `GET /api/security/activity` — recent sign-in activity for the signed-in account, in plain English.
 - `GET /api/bb84/audit.csv` — authenticated per-account export of that account's audit rows.
 
 BB84 sessions are held in server memory for this single-process demo and expire after 10 minutes. Run one Uvicorn worker so the start/sift/sample requests reach the same process. The audit table persists the metrics, not Alice/Bob measurement strings or key material.

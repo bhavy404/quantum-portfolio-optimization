@@ -48,11 +48,20 @@
 
   async function api(path, opts = {}) {
     const headers = { "Content-Type": "application/json" };
-    if (S.token) headers.Authorization = "Bearer " + S.token;
+    const isAuthEndpoint = path.startsWith("/api/auth/");
+    if (S.token && !isAuthEndpoint) headers.Authorization = "Bearer " + S.token;
     const res = await fetch(path, { method: opts.method || "GET", headers, body: opts.body ? JSON.stringify(opts.body) : undefined });
     let data = null;
     try { data = await res.json(); } catch (e) { /* empty body */ }
-    if (res.status === 401 && S.token) { logout(); throw new Error(data && data.detail || "Please log in again."); }
+    if (res.status === 401 && S.token && !isAuthEndpoint) {
+      // Expired/revoked token: clear the browser session without making a
+      // second logout request that would also return 401.
+      S.token = null; S.user = null; S.welcome = null;
+      store.del("qp_token"); store.del("qp_user");
+      location.hash = "#/login";
+      route();
+      throw new Error(data && data.detail || "Your session expired. Please log in again.");
+    }
     if (!res.ok) {
       let msg = data && data.detail;
       if (Array.isArray(msg)) msg = msg.map((m) => m.msg.replace(/^Value error, /, "")).join(" ");
@@ -104,6 +113,11 @@
   }
 
   // ---------- login ----------
+  // The eavesdropper demo lives on its own page so the sign-in form stays simple.
+  function demoLink() {
+    return h("p", { class: "demo-link" }, "Curious how we catch eavesdroppers? ", h("a", { href: "#/eve-demo" }, "Try the eavesdropper demo"));
+  }
+
   function viewLoginLive() {
     let mode = "login", eveOn = false, livePromise = null, liveExchange = null, runSerial = 0;
     const err = h("p", { class: "error", role: "alert" });
@@ -116,6 +130,12 @@
     const attemptsBox = h("div", { class: "live-attempts" });
     const tableBox = h("div", { class: "live-table-wrap" });
     const keyLine = h("p", { class: "live-key-line" }, "Quantum key not ready yet.");
+    const securityDetails = h("details", { class: "sec-opts live-security-details" },
+  h("summary", null, "View BB84 security details"),
+  attemptsBox,
+  tableBox,
+  keyLine
+);
     function drawLive(update) {
       if (!update) return;
       attemptsBox.replaceChildren(...(update.attempts || []).map(a => h("div", { class: "live-attempt " + (a.verdict === "secure" ? "is-secure" : "is-detected") },
@@ -142,16 +162,13 @@
       tabs.replaceChildren(
         h("button", { type: "button", role: "tab", "aria-selected": String(mode === "login"), onclick: () => { mode = "login"; draw(); } }, "Log in"),
         h("button", { type: "button", role: "tab", "aria-selected": String(mode === "register"), onclick: () => { mode = "register"; draw(); } }, "Create account"));
-      const eveSwitch = h("label", { class: "opt eve-live-switch" },
-        h("input", { type: "checkbox", name: "eve_on", checked: eveOn, onchange: e => { eveOn = e.target.checked; startExchange(); } }),
-        h("span", null, "Eve is on the line"));
       form.replaceChildren(...[
         mode === "register" ? h("label", { class: "field" }, h("span", null, "Your name"), h("input", { type: "text", name: "name", autocomplete: "name" })) : null,
         h("label", { class: "field" }, h("span", null, "Email"), h("input", { type: "email", name: "email", autocomplete: "email", required: true })),
         h("label", { class: "field" }, h("span", null, "Password"), h("input", { type: "password", name: "password", autocomplete: mode === "login" ? "current-password" : "new-password", required: true, minLength: 8 }),
           mode === "register" ? h("small", { class: "muted" }, "At least 8 characters. Use a throwaway password for the class demo.") : null),
-        h("div", { class: "live-eve-control" }, eveSwitch, h("small", { class: "muted" }, "When enabled, Eve intercepts the first exchange. It should be caught and discarded before a clean retry.")),
-        err, h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account")].filter(Boolean));
+        err, h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account"),
+        demoLink()].filter(Boolean));
       err.textContent = "";
     }
     function startExchange() {
@@ -168,32 +185,41 @@
     form.addEventListener("submit", async e => {
       e.preventDefault();
       const fd = new FormData(form), emailValue = String(fd.get("email") || "").trim();
+      const submittedMode = mode;
       err.textContent = "";
       const btn = form.querySelector('button[type="submit"]'); btn.disabled = true;
-      const busy = h("div", { class: "securing", role: "status" }, h("div", { class: "qdots" }, h("i"), h("i"), h("i"), h("i"), h("i")),
-        h("h3", null, "Verifying the live BB84 proof"), h("p", { class: "muted" }, "The browser derives the key locally and sends only a one-time HMAC proof."));
+      const busy = h("div", { class: "securing", role: "status" },
+  h("div", { class: "qdots" }, h("i"), h("i"), h("i")),
+  h("h3", null, "Securing your sign-in"),
+  h("p", { class: "muted" },
+    "Your sign-in is being verified using a fresh security exchange."
+  )
+);
       form.style.display = "none"; tabs.style.display = "none"; panel.append(busy);
       try {
         const exchange = await livePromise;
-        const proofMode = mode === "register" ? "signup" : "login";
+        const proofMode = submittedMode === "register" ? "signup" : "login";
         const proof = await exchange.makeProof(emailValue, proofMode);
-        const out = await api("/api/auth/" + (mode === "register" ? "register" : "login"), { method: "POST", body: {
+        const out = await api("/api/auth/" + (submittedMode === "register" ? "register" : "login"), { method: "POST", body: {
           email: emailValue, password: fd.get("password"), name: fd.get("name") || "",
           session_id: exchange.session_id, proof
         }});
-        if (mode === "register") {
-          // Sign-up only creates the account; the person must then log in with their own BB84 exchange.
+        if (submittedMode === "register") {
+          // Registration creates an account only; it must not create a browser session.
           busy.remove(); form.style.display = ""; tabs.style.display = ""; mode = "login"; draw();
-          err.textContent = "Account created. Now log in with the same email and password."; err.style.color = "#6fcf97";
+          const emailInput = form.querySelector('input[name="email"]');
+          if (emailInput) emailInput.value = emailValue;
+          err.textContent = "Account created successfully. Please log in with your email and password.";
+          err.style.color = "#6fcf97";
           startExchange(); return;
         }
         err.style.color = "";
         S.token = out.token; S.user = out.user; store.set("qp_token", out.token); store.set("qp_user", out.user);
-        S.welcome = null; location.hash = "#/home"; route();
+        goToMarketOverview();
       } catch (ex) { busy.remove(); form.style.display = ""; tabs.style.display = ""; err.style.color = ""; err.textContent = ex.message; btn.disabled = false; startExchange(); }
     });
     draw();
-    livePanel.append(status, attemptsBox, tableBox, keyLine);
+    livePanel.append(status, securityDetails);
     shell(h("div", { class: "login" },
       h("div", { class: "pitch" }, h("h1", null, "Pick stocks with less guesswork"),
         h("p", null, "Choose the Indian companies you are considering, tell us how much risk you can live with, and get a suggested mix."),
@@ -218,28 +244,66 @@
         h("label", { class: "field" }, h("span", null, "Email"), h("input", { type: "email", name: "email", autocomplete: "email", required: true })),
         h("label", { class: "field" }, h("span", null, "Password"), h("input", { type: "password", name: "password", autocomplete: mode === "login" ? "current-password" : "new-password", required: true, minLength: 8 }),
           mode === "register" ? h("small", { class: "muted" }, "At least 8 characters.") : null),
-        h("details", { class: "sec-opts" }, h("summary", null, "Security options"),
-          h("p", { class: "muted" }, "Every sign-in runs a fresh BB84 quantum key exchange and makes a new authentication key. No eavesdropper is simulated unless you choose to."),
-          h("label", { class: "opt" }, h("input", { type: "checkbox", name: "eve_test" }), h("span", null, "Put an eavesdropper inside this login attempt (the attacked key must be rejected, then login retries cleanly)")),
-          S.health && S.health.ibm_configured ? h("label", { class: "opt" }, h("input", { type: "checkbox", name: "use_ibm", checked: S.health.login_target !== "simulator" }), h("span", null, "Use a real IBM quantum processor for this login attempt (optional; may wait in a hardware queue). Simulator is the default.")) : null),
+        S.health && S.health.ibm_configured ? h("details", { class: "sec-opts" }, h("summary", null, "Advanced options"),
+          h("label", { class: "opt" }, h("input", { type: "checkbox", name: "use_ibm", checked: S.health.login_target !== "simulator" }), h("span", null, "Use a real IBM quantum processor for this sign-in (optional; may wait in a hardware queue). The simulator is the default."))) : null,
         err,
-        h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account")].filter(Boolean));
+        h("button", { class: "btn", type: "submit", style: "width:100%" }, mode === "login" ? "Log in" : "Create account"),
+        demoLink()].filter(Boolean));
       err.textContent = "";
     }
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
-      const fd = new FormData(form); err.textContent = "";
-      const btn = form.querySelector("button[type=submit]"); btn.disabled = true;
-      const eveTest = fd.get("eve_test") === "on", ibmShown = !!(S.health && S.health.ibm_configured), useIbm = ibmShown ? fd.get("use_ibm") === "on" : false;
-      const busy = h("div", { class: "securing", role: "status" }, h("div", { class: "qdots", "aria-hidden": "true" }, h("i"), h("i"), h("i"), h("i"), h("i")),
-        h("h3", null, "Securing your session"),
-        h("p", { class: "muted" }, useIbm ? "Running BB84 on a real IBM quantum computer. IBM has a queue, so this can take a few minutes; it falls back to the simulator if IBM is slow." : "Running the BB84 key exchange, checking for eavesdroppers and deriving your authentication key…"));
-      form.style.display = "none"; tabs.style.display = "none"; panel.append(busy);
+      const fd = new FormData(form);
+      const email = String(fd.get("email") || "").trim();
+      const currentMode = mode;
+      err.textContent = "";
+      err.style.color = "";
+      const btn = form.querySelector('button[type="submit"]');
+      btn.disabled = true;
+      const eveTest = false;  // the eavesdropper demo has its own page; it is never part of a real sign-in
+      const ibmShown = !!(S.health && S.health.ibm_configured);
+      const useIbm = ibmShown ? fd.get("use_ibm") === "on" : false;
+      const busy = h("div", { class: "securing", role: "status" },
+        h("div", { class: "qdots", "aria-hidden": "true" }, h("i"), h("i"), h("i"), h("i"), h("i")),
+        h("h3", null, currentMode === "register" ? "Creating your account..." : "Securing your session"),
+        h("p", { class: "muted" }, useIbm
+          ? "Running BB84 on a real IBM quantum computer. IBM has a queue, so this can take a few minutes; it falls back to the simulator if IBM is slow."
+          : "Checking that nobody is listening in and making your sign-in key…"));
+      form.style.display = "none";
+      tabs.style.display = "none";
+      panel.append(busy);
       try {
-        const out = await api("/api/auth/" + mode, { method: "POST", body: Object.assign({ email: fd.get("email"), password: fd.get("password"), name: fd.get("name") || "", eve_test: eveTest }, ibmShown ? { use_ibm: useIbm } : {}) });
-        S.token = out.token; S.user = out.user; store.set("qp_token", out.token); store.set("qp_user", out.user);
-        S.welcome = out.security; location.hash = "#/welcome"; route();
-      } catch (ex) { busy.remove(); form.style.display = ""; tabs.style.display = ""; err.textContent = ex.message; btn.disabled = false; }
+        const out = await api("/api/auth/" + (currentMode === "register" ? "register" : "login"), {
+          method: "POST",
+          body: Object.assign({ email, password: fd.get("password"), name: fd.get("name") || "", eve_test: eveTest },
+            ibmShown ? { use_ibm: useIbm } : {})
+        });
+        if (currentMode === "register") {
+          // Do not store the registration response as an authenticated session.
+          busy.remove();
+          form.style.display = "";
+          tabs.style.display = "";
+          mode = "login";
+          draw();
+          const emailInput = form.querySelector('input[name="email"]');
+          if (emailInput) emailInput.value = email;
+          err.textContent = "Account created successfully. Please log in with your email and password.";
+          err.style.color = "#6fcf97";
+          return;
+        }
+        S.token = out.token;
+        S.user = out.user;
+        store.set("qp_token", out.token);
+        store.set("qp_user", out.user);
+        goToMarketOverview();
+      } catch (ex) {
+        busy.remove();
+        form.style.display = "";
+        tabs.style.display = "";
+        err.style.color = "";
+        err.textContent = ex.message;
+        btn.disabled = false;
+      }
     });
     draw();
     shell(h("div", { class: "login" },
@@ -280,6 +344,7 @@
         h("p", { class: "eyebrow" }, "INDIAN MARKETS · OVERVIEW"),
         h("h1", null, "Your market snapshot"),
         h("p", null, "Check the broad Indian market indices first. When you’re ready, continue to choose individual stocks for your portfolio.")),
+      safetyPrompt(),
       h("section", { class: "index-grid", id: "market-index-grid", "aria-label": "Indian market indices" }, cards),
       h("div", { class: "market-actions panel" },
         h("div", null, h("h2", null, "Build your portfolio"), h("p", { class: "muted" }, "NIFTY 50 and SENSEX are market indices, shown separately from individual stocks.")),
@@ -1512,6 +1577,7 @@
   async function viewSecurity() {
     shell(h("p", { class: "boot" }, "Loading…"), "security");
     let st; try { st = await api("/api/security/status"); } catch (ex) { return; }
+    let act = { items: [] }; try { act = await api("/api/security/activity"); } catch (ex) { /* the rest of the page still works */ }
     const out = h("div"), k = st.key, x = st.session && st.session.session_id ? st.session : null;
     const rotate = h("button", { class: "btn alt", type: "button", onclick: async (e) => {
       const b = e.currentTarget; b.disabled = true; out.replaceChildren(h("p", { class: "muted" }, "Running quantum circuits…"));
@@ -1527,10 +1593,14 @@
     } }, "Download BB84 audit CSV");
     shell(h("div", null, h("div", { class: "pagehead" }, h("h1", null, "Security"),
       h("p", null, "Your session and your saved results are protected by keys made with BB84 quantum key exchange. Here is the key on offer, whether anyone was listening, and where the quantum part ran.")),
+      h("div", { class: "panel" }, h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "Safety check"),
+        h("p", { class: "muted" }, "See for yourself that a snooper on your sign-in gets caught. Takes about ten seconds."))),
+        h("a", { class: "btn", href: "#/eve-demo" }, "Run safety check")),
+      activityPanel(act.items || []),
       x ? [statusHero(x), eveBanner(x), x.fallback_note ? h("p", { class: "note warn" }, x.fallback_note) : null, h("div", { class: "sec-grid" }, authKeyCard(x), qberCard(x))]
         : h("p", { class: "note warn" }, "This session has no handshake record. Log out and back in to run one."),
       h("div", { class: "sec-grid" }, ibmCard(st, x), testPanel(st)),
-      historyTable(st.history || []),
+      (st.history || []).length ? h("details", { class: "sec-opts" }, h("summary", null, "Technical details of recent handshakes"), historyTable(st.history)) : null,
       h("div", { class: "panel" }, h("h2", null, "Saved-results key"),
         k ? h("dl", { class: "kv" }, h("dt", null, "Key number"), h("dd", null, "#" + k.id), h("dt", null, "Created"), h("dd", null, k.created + " UTC"),
           h("dt", null, "Made on"), h("dd", null, k.backend), h("dt", null, "Quantum circuits run"), h("dd", null, `${k.sessions} sessions, ${k.raw_qubits} qubits`),
@@ -1544,6 +1614,92 @@
         h("p", { class: "note warn" }, "Honest limit: the quantum circuits run on the server, so this is not a quantum link between your device and ours. Normal HTTPS still protects data in transit. The quantum part adds quantum-made randomness and a tamper check to the keys, and the server secret in the derivation means they are never weaker than standard practice."))), "security");
   }
 
+  // ---------- plain-English sign-in activity ----------
+  function activityPanel(items) {
+    const when = (s) => { const d = new Date(String(s).replace(" ", "T") + "Z"); return isNaN(d.getTime()) ? String(s) : d.toLocaleString("en-IN"); };
+    return h("div", { class: "panel" },
+      h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "Recent sign-in activity"), h("p", { class: "muted" }, "The latest times this account was created or signed in, and whether anything looked wrong."))),
+      items.length
+        ? h("ul", { class: "activity-list" }, items.map((i) => h("li", { class: "activity " + (i.level || "good") },
+            h("span", { class: "activity-dot", "aria-hidden": "true" }),
+            h("div", null, h("b", null, i.title), " ", h("small", { class: "muted" }, when(i.when)), h("p", null, i.detail)))))
+        : h("p", { class: "muted" }, "Nothing yet. Your sign-ins will appear here."));
+  }
+
+  // ---------- eavesdropper demo: its own page, kept off the sign-in form ----------
+  function safetyPrompt() {
+    let seen = false; try { seen = !!localStorage.getItem("qp_safety_done"); } catch (e) { /* ignore */ }
+    if (seen || !(S.health && S.health.login_mode === "live")) return null;
+    const card = h("div", { class: "panel", id: "safety-prompt" },
+      h("div", { class: "panel-heading" }, h("div", null, h("h2", null, "Want to see how your sign-in is protected?"),
+        h("p", { class: "muted" }, "Run the 10-second safety check and watch a pretend snooper get caught.")),
+        h("div", { class: "noprint" }, h("a", { class: "btn", href: "#/eve-demo" }, "Run safety check"), " ",
+          h("button", { class: "btn alt", type: "button", onclick: () => { try { localStorage.setItem("qp_safety_done", "1"); } catch (e) { /* ignore */ } card.remove(); } }, "Not now"))));
+    return card;
+  }
+
+  async function viewEveDemo() {
+    const live = !!(S.health && S.health.login_mode === "live");
+    const back = h("a", { class: "btn alt small", href: S.token ? "#/security" : "#/login" }, S.token ? "← Back to Security" : "← Back to sign in");
+    const intro = h("div", { class: "pagehead" }, h("h1", null, "Safety check"),
+      h("p", null, "Your sign-in key is made from light-like quantum bits that change if anyone looks at them. Run the check to watch a pretend snooper get caught. It takes about ten seconds and never signs you out or changes your password."));
+    if (!live) {
+      if (!S.token) {
+        shell(h("div", null, intro, h("div", { class: "panel" }, h("p", null, "In this setup the demo runs from inside your account. Log in first, then open the demo again from the Security page."), back)), "security");
+        return;
+      }
+      shell(h("p", { class: "boot" }, "Loading…"), "security");
+      let st; try { st = await api("/api/security/status"); } catch (ex) { return; }
+      shell(h("div", null, intro, testPanel(st), back), "security");
+      return;
+    }
+    const out = h("div", { class: "test-out", "aria-live": "polite" });
+    const btns = [];
+    const me_email = S.token && S.user && S.user.email ? S.user.email : "eve-demo";
+    const limitOf = (a) => (a.limit && a.limit < 1 ? a.limit : 0.11);
+    const round = (a) => {
+      const caught = a.verdict !== "secure";
+      return h("article", { class: "attempt-row" },
+        h("div", { class: "panel-heading" },
+          h("b", null, `Round ${a.number} · ${a.eve ? "a pretend eavesdropper was listening" : "nobody was listening"}`),
+          chip(caught ? "Caught · key thrown away" : "Safe · key accepted", caught ? "bad" : "good")),
+        h("p", { class: "muted" }, caught
+          ? `About ${pct(a.qber, 0)} of the test bits did not match (the safe limit is ${pct(limitOf(a), 0)}). That is the mark a listener leaves, so this key was thrown away.`
+          : `Only ${pct(a.qber, 1)} of the test bits did not match, well under the ${pct(limitOf(a), 0)} limit, so this key was accepted.`),
+        gauge(a.qber, limitOf(a), caught, "Mismatch rate"));
+    };
+    const run = (eve) => async (e) => {
+      const me = e.currentTarget;
+      btns.forEach((b) => { b.disabled = true; });
+      out.replaceChildren(h("p", { class: "muted" }, "Running the key exchange…"));
+      try {
+        const r = await QPortalBB84Live.run(eve, me_email, (u) => out.replaceChildren(...u.attempts.map(round)));
+        const note = h("p", { class: "note" }, eve ? "The listener was caught in round 1, that key was thrown away, and a clean round produced the safe key." : "Nobody was listening, so the first round was accepted.");
+        out.replaceChildren(...r.attempts.map(round), note);
+        const at = r.attempts || [];
+        if (eve && S.token && at.length > 1 && at[0].verdict !== "secure" && at[at.length - 1].verdict === "secure") {
+          try { await api("/api/security/safety-check", { method: "POST" }); note.append(" Saved to your activity."); try { localStorage.setItem("qp_safety_done", "1"); } catch (e2) { /* optional */ } }
+          catch (e3) { note.append(" (Could not save this check to your activity.)"); }
+        }
+      } catch (ex) { out.replaceChildren(h("p", { class: "error" }, ex.message)); }
+      btns.forEach((b) => { b.disabled = false; }); me.focus();
+    };
+    const clean = h("button", { class: "btn alt", type: "button", onclick: run(false) }, "Run with nobody listening");
+    const attack = h("button", { class: "btn", type: "button", onclick: run(true) }, "Run with an eavesdropper");
+    btns.push(clean, attack);
+    shell(h("div", null, intro,
+      h("div", { class: "panel" }, h("p", { class: "live-simulation-note" }, "Qubits are simulated in this demo. The protocol and the detection are real, but there is no quantum channel to your device."),
+        h("div", { class: "noprint test-actions" }, clean, " ", attack), out),
+      back), "security");
+  }
+
+  function goToMarketOverview() {
+    // Always discard the BB84 welcome/security landing state after authentication.
+    S.welcome = null;
+    if (location.hash !== "#/home") location.hash = "#/home";
+    route();
+  }
+
   // ---------- router ----------
   async function route() {
     killCharts();
@@ -1551,8 +1707,14 @@
     setupChartDefaults();
     if (!S.health) { try { S.health = await (await fetch("/api/health")).json(); } catch (e) { S.health = { synthetic: false, max_shortlist: 12, min_shortlist: 3 }; } }
     const [, page, arg] = (location.hash || "#/").split("/");
+    if (page === "eve-demo") return viewEveDemo();  // reachable before sign-in (live mode) and after
     if (!S.token) { viewLogin(); return; }
-    if (page === "welcome") { if (S.welcome) return viewWelcome(); location.hash = "#/home"; return; }
+    if (page === "welcome") {
+      S.welcome = null;
+      // Replace the old hash and render Market Overview immediately.
+      history.replaceState(null, "", location.pathname + location.search + "#/home");
+      return viewHome();
+    }
     S.welcome = null;
     if (page === "login") { location.hash = "#/home"; return; }
     if (page === "home" || !page) return viewHome();
